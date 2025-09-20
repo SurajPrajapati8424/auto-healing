@@ -11,7 +11,7 @@ import sys
 from botocore.exceptions import ClientError
 
 class TestSuite:
-    def __init__(self, config_file='..\\web-interface\\config.js'):
+    def __init__(self, config_file='web-interface\\config.js'):
         self.config = self.load_config(config_file)
         self.cognito = boto3.client('cognito-idp', region_name=self.config['region'])
         self.access_token = None

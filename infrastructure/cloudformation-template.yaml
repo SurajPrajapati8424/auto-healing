@@ -171,6 +171,7 @@ Resources:
           TABLE_NAME: !Ref BucketMetadataTable
           SNS_TOPIC: !Ref BucketNotificationTopic
           ENVIRONMENT: !Ref Environment
+          REGION: !Ref AWS::Region
       Code:
         ZipFile: |
           import json
@@ -187,6 +188,7 @@ Resources:
           table = dynamodb.Table(os.environ['TABLE_NAME'])
           topic_arn = os.environ['SNS_TOPIC']
           environment = os.environ['ENVIRONMENT']
+          region = os.environ.get('REGION', 'us-east-1')
 
           def lambda_handler(event, context):
               try:
@@ -230,13 +232,19 @@ Resources:
                               'body': json.dumps({'error': 'Project already exists for this user'})
                           }
                   except Exception as e:
-                      pass
+                      print(f"DynamoDB get_item warning: {e}")
                   
-                  # Create S3 bucket
-                  s3.create_bucket(Bucket=bucket_name)
+                  # Create S3 bucket (region-aware)
+                  if region == "us-east-1":
+                      s3.create_bucket(Bucket=bucket_name)
+                  else:
+                      s3.create_bucket(
+                          Bucket=bucket_name,
+                          CreateBucketConfiguration={'LocationConstraint': region}
+                      )
                   
                   # Configure bucket security
-                  s3.put_bucket_public_access_block(
+                  s3.put_public_access_block(
                       Bucket=bucket_name,
                       PublicAccessBlockConfiguration={
                           'BlockPublicAcls': True,
@@ -280,6 +288,7 @@ Resources:
                       Subject="S3 Bucket Created"
                   )
                   
+                  # ✅ Return useful response for API clients
                   return {
                       'statusCode': 200,
                       'headers': {
@@ -289,7 +298,9 @@ Resources:
                       'body': json.dumps({
                           'project_name': project_name,
                           'bucket_name': bucket_name,
-                          'status': 'created'
+                          'status': 'created',
+                          'region': region,
+                          'user': user_email
                       })
                   }
                   
@@ -298,7 +309,7 @@ Resources:
                   return {
                       'statusCode': 500,
                       'headers': {'Content-Type': 'application/json'},
-                      'body': json.dumps({'error': 'Internal server error'})
+                      'body': json.dumps({'error': 'Internal server error', 'details': str(e)})
                   }
 
   # Lambda: List Buckets (Enhanced)

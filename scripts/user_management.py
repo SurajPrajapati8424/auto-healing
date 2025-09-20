@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 def load_config():
     """Load configuration from CloudFormation outputs"""
     try:
-        with open('../web-interface/config.js', 'r') as f:
+        with open('web-interface/config.js', 'r') as f:
             content = f.read()
             # Extract values from JavaScript config
             import re
