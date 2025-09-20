@@ -1,5 +1,5 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'S3 Bucket Management System with Authentication'
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "S3 Bucket Management System with Authentication"
 
 Parameters:
   NotificationEmail:
@@ -26,7 +26,7 @@ Resources:
           RequireSymbols: false
       AutoVerifiedAttributes:
         - email
-      MfaConfiguration: OFF
+      MfaConfiguration: "OFF"
       EmailConfiguration:
         EmailSendingAccount: COGNITO_DEFAULT
       Schema:
@@ -46,9 +46,7 @@ Resources:
       ClientName: !Sub "${Environment}-bucket-management-client"
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ADMIN_NO_SRP_AUTH
-        - USER_PASSWORD_AUTH
-        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       PreventUserExistenceErrors: ENABLED
       TokenValidityUnits:
@@ -61,12 +59,13 @@ Resources:
 
   CognitoIdentityPool:
     Type: AWS::Cognito::IdentityPool
+    DependsOn: CognitoUserPoolClient
     Properties:
-      IdentityPoolName: !Sub "${Environment}_bucket_management_identity_pool"
+      IdentityPoolName: !Sub "${Environment}-bucket-management-identity-pool"
       AllowUnauthenticatedIdentities: false
       CognitoIdentityProviders:
         - ClientId: !Ref CognitoUserPoolClient
-          ProviderName: !GetAtt CognitoUserPool.ProviderName
+          ProviderName: !Sub cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}          
 
   # DynamoDB Table for metadata
   BucketMetadataTable:
@@ -117,7 +116,7 @@ Resources:
     Properties:
       RoleName: !Sub "${Environment}-bucket-management-role"
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -128,7 +127,7 @@ Resources:
       Policies:
         - PolicyName: BucketManagementPolicy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
@@ -140,7 +139,7 @@ Resources:
                   - s3:PutBucketVersioning
                   - s3:PutBucketEncryption
                   - s3:HeadBucket
-                Resource: '*'
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
@@ -149,9 +148,9 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                Resource: 
+                Resource:
                   - !GetAtt BucketMetadataTable.Arn
-                  - !Sub '${BucketMetadataTable.Arn}/index/*'
+                  - !Sub "${BucketMetadataTable.Arn}/index/*"
               - Effect: Allow
                 Action:
                   - sns:Publish
@@ -180,15 +179,15 @@ Resources:
           import uuid
           import re
           from datetime import datetime
-          
+
           s3 = boto3.client('s3')
           dynamodb = boto3.resource('dynamodb')
           sns = boto3.client('sns')
-          
+
           table = dynamodb.Table(os.environ['TABLE_NAME'])
           topic_arn = os.environ['SNS_TOPIC']
           environment = os.environ['ENVIRONMENT']
-          
+
           def lambda_handler(event, context):
               try:
                   # Extract user info from Cognito
@@ -321,10 +320,10 @@ Resources:
           import boto3
           import os
           from boto3.dynamodb.conditions import Key
-          
+
           dynamodb = boto3.resource('dynamodb')
           table = dynamodb.Table(os.environ['TABLE_NAME'])
-          
+
           def lambda_handler(event, context):
               try:
                   # Extract user info from Cognito
@@ -415,15 +414,15 @@ Resources:
           import boto3
           import os
           from datetime import datetime
-          
+
           s3 = boto3.client('s3')
           dynamodb = boto3.resource('dynamodb')
           sns = boto3.client('sns')
-          
+
           table = dynamodb.Table(os.environ['TABLE_NAME'])
           topic_arn = os.environ['SNS_TOPIC']
           environment = os.environ['ENVIRONMENT']
-          
+
           def lambda_handler(event, context):
               processed_buckets = 0
               healed_buckets = 0
@@ -480,7 +479,7 @@ Resources:
                       'statusCode': 500,
                       'body': json.dumps({'error': str(e)})
                   }
-          
+
           def recreate_bucket(bucket_name, project_name, user_email, display_name):
               try:
                   # Recreate bucket
@@ -547,6 +546,7 @@ Resources:
   # Cognito Authorizer
   CognitoAuthorizer:
     Type: AWS::ApiGateway::Authorizer
+    DependsOn: CognitoUserPool
     Properties:
       Name: CognitoAuthorizer
       Type: COGNITO_USER_POOLS
@@ -623,7 +623,7 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 
+        Uri: !Sub
           - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
           - LambdaArn: !GetAtt CreateBucketFunction.Arn
 
@@ -638,7 +638,7 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 
+        Uri: !Sub
           - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
           - LambdaArn: !GetAtt ListBucketsFunction.Arn
 
@@ -649,7 +649,7 @@ Resources:
       FunctionName: !Ref CreateBucketFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "${BucketManagementAPI}/*/POST/buckets"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BucketManagementAPI}/*/POST/buckets"
 
   ListBucketsPermission:
     Type: AWS::Lambda::Permission
@@ -657,7 +657,7 @@ Resources:
       FunctionName: !Ref ListBucketsFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "${BucketManagementAPI}/*/GET/buckets"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BucketManagementAPI}/*/GET/buckets"
 
   # API Gateway Deployment
   APIDeployment:
@@ -694,9 +694,10 @@ Resources:
   # IAM Role for authenticated Cognito users
   CognitoAuthRole:
     Type: AWS::IAM::Role
+    DependsOn: CognitoIdentityPool
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -704,21 +705,22 @@ Resources:
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
-                'cognito-identity.amazonaws.com:aud': !Ref CognitoIdentityPool
-              'ForAnyValue:StringLike':
-                'cognito-identity.amazonaws.com:amr': authenticated
+                "cognito-identity.amazonaws.com:aud": !Ref CognitoIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
       Policies:
         - PolicyName: CognitoAuthPolicy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - execute-api:Invoke
-                Resource: !Sub "${BucketManagementAPI}/*"
+                Resource: "*"
 
   CognitoIdentityPoolRoleAttachment:
     Type: AWS::Cognito::IdentityPoolRoleAttachment
+    DependsOn: CognitoAuthRole
     Properties:
       IdentityPoolId: !Ref CognitoIdentityPool
       Roles:
@@ -730,31 +732,31 @@ Outputs:
     Value: !Sub "https://${BucketManagementAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
     Export:
       Name: !Sub "${Environment}-bucket-api-endpoint"
-  
+
   UserPoolId:
     Description: Cognito User Pool ID
     Value: !Ref CognitoUserPool
     Export:
       Name: !Sub "${Environment}-user-pool-id"
-      
+
   UserPoolClientId:
     Description: Cognito User Pool Client ID
     Value: !Ref CognitoUserPoolClient
     Export:
       Name: !Sub "${Environment}-user-pool-client-id"
-  
+
   IdentityPoolId:
     Description: Cognito Identity Pool ID
     Value: !Ref CognitoIdentityPool
     Export:
       Name: !Sub "${Environment}-identity-pool-id"
-  
+
   DynamoDBTable:
     Description: DynamoDB table name
     Value: !Ref BucketMetadataTable
     Export:
       Name: !Sub "${Environment}-bucket-metadata-table"
-    
+
   SNSTopic:
     Description: SNS topic ARN
     Value: !Ref BucketNotificationTopic
