@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S3 Bucket Manager</title>
+    
+    <!-- AWS SDK -->
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1400.0.min.js"></script>
+    <!-- Configuration -->
+    <!-- 
+    // const CONFIG = {
+    //     region: "us-east-1",  // Replace with your AWS region
+    //     identityPoolId: "us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    //     userPoolId: "us-east-1_xxxxxxxx",
+    //     userPoolClientId: "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    //     apiEndpoint: "https://your-api-id.execute-api.us-east-1.amazonaws.com/prod"
+    // }; -->
+    <script src="config.js"></script>
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🗄️ S3 Bucket Manager</h1>
+            <p>Secure, Automated Bucket Management System</p>
+        </div>
+        
+        <div class="main-content">
+            <!-- Authentication Section -->
+            <div id="authSection" class="auth-section active">
+                <div class="auth-forms">
+                    <!-- Sign In Form -->
+                    <div class="auth-form">
+                        <h3>Sign In</h3>
+                        <div class="form-group">
+                            <label for="signInEmail">Email:</label>
+                            <input type="email" id="signInEmail" placeholder="Enter your email">
+                        </div>
+                        <div class="form-group">
+                            <label for="signInPassword">Password:</label>
+                            <input type="password" id="signInPassword" placeholder="Enter your password">
+                        </div>
+                        <button onclick="signIn()" id="signInBtn">Sign In</button>
+                    </div>
+                    
+                    <!-- Sign Up Form -->
+                    <div class="auth-form">
+                        <h3>Sign Up</h3>
+                        <div class="form-group">
+                            <label for="signUpName">Full Name:</label>
+                            <input type="text" id="signUpName" placeholder="Enter your full name">
+                        </div>
+                        <div class="form-group">
+                            <label for="signUpEmail">Email:</label>
+                            <input type="email" id="signUpEmail" placeholder="Enter your email">
+                        </div>
+                        <div class="form-group">
+                            <label for="signUpPassword">Password:</label>
+                            <input type="password" id="signUpPassword" placeholder="Create a password (min 8 chars)">
+                        </div>
+                        <button onclick="signUp()" id="signUpBtn">Sign Up</button>
+                    </div>
+                </div>
+                
+                <!-- Confirmation Form (hidden by default) -->
+                <div id="confirmationForm" style="display: none;" class="auth-form">
+                    <h3>Confirm Your Account</h3>
+                    <p>Please check your email and enter the confirmation code:</p>
+                    <div class="form-group">
+                        <label for="confirmationCode">Confirmation Code:</label>
+                        <input type="text" id="confirmationCode" placeholder="Enter 6-digit code">
+                    </div>
+                    <button onclick="confirmSignUp()" id="confirmBtn">Confirm Account</button>
+                    <button onclick="resendConfirmation()" class="button-secondary">Resend Code</button>
+                </div>
+            </div>
+            
+            <!-- Application Section -->
+            <div id="appSection" class="app-section">
+                <div class="user-info">
+                    <strong>Welcome, <span id="userName">User</span>!</strong>
+                    <button onclick="signOut()" class="button-secondary" style="float: right;">Sign Out</button>
+                </div>
+                
+                <div id="status"></div>
+                
+                <div class="form-group">
+                    <label for="projectName">Project Name:</label>
+                    <input type="text" id="projectName" placeholder="Enter project name (e.g., my-web-app)">
+                    <small>Only lowercase letters, numbers, and hyphens allowed (3-50 characters)</small>
+                </div>
+                
+                <button onclick="createBucket()" id="createBtn">Create Bucket</button>
+                <button onclick="loadBuckets()" id="refreshBtn" class="button-secondary">Refresh List</button>
+                
+                <div class="bucket-list">
+                    <h2>Your Buckets</h2>
+                    <div id="bucketsList"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
