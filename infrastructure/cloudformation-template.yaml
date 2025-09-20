@@ -73,7 +73,7 @@ Resources:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "${Environment}-bucket-metadata"
-      BillingMode: ON_DEMAND
+      BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: project_name
           AttributeType: S
@@ -156,19 +156,6 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref BucketNotificationTopic
-
-  # Lambda Layer for common dependencies
-  CommonLayer:
-    Type: AWS::Lambda::LayerVersion
-    Properties:
-      LayerName: !Sub "${Environment}-bucket-management-common"
-      Description: Common dependencies for bucket management
-      Content:
-        ZipFile: |
-          # This would contain common utilities
-          # For now, we'll put utilities directly in functions
-      CompatibleRuntimes:
-        - python3.9
 
   # Lambda: Create Bucket (Enhanced)
   CreateBucketFunction:
