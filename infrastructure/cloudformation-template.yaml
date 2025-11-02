@@ -227,15 +227,33 @@ Resources:
                           'body': json.dumps({'error': 'project_name is required'})
                       }
                   
-                  project_name = body['project_name'].lower().strip()
+                  project_name_raw = body['project_name'].strip()
                   
-                  # Validate project name
-                  if not re.match(r'^[a-z0-9-]+$', project_name):
+                  # Validate project name BEFORE converting to lowercase
+                  # Check for invalid characters (uppercase, underscores, spaces, etc.)
+                  if not re.match(r'^[a-z0-9-]+$', project_name_raw.lower()):
                       return {
                           'statusCode': 400,
-                          'headers': {'Content-Type': 'application/json'},
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
                           'body': json.dumps({'error': 'Project name must contain only lowercase letters, numbers, and hyphens'})
                       }
+                  
+                  # Reject if original contains uppercase (even if lowercase version would be valid)
+                  if project_name_raw != project_name_raw.lower():
+                      return {
+                          'statusCode': 400,
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
+                          'body': json.dumps({'error': 'Project name must contain only lowercase letters, numbers, and hyphens (no uppercase letters allowed)'})
+                      }
+                  
+                  # Now convert to lowercase for storage
+                  project_name = project_name_raw.lower()
                   
                   if len(project_name) < 3 or len(project_name) > 50:
                       return {

@@ -78,12 +78,12 @@ class TestSuite:
                 return False
     
     def authenticate_test_user(self):
-        """Authenticate the test user"""
+        """Authenticate the test user using USER_PASSWORD_AUTH flow"""
         try:
-            response = self.cognito.admin_initiate_auth(
-                UserPoolId=self.config['user_pool_id'],
+            # Use initiate_auth with USER_PASSWORD_AUTH (matches web interface)
+            response = self.cognito.initiate_auth(
                 ClientId=self.config['client_id'],
-                AuthFlow='ADMIN_NO_SRP_AUTH',
+                AuthFlow='USER_PASSWORD_AUTH',
                 AuthParameters={
                     'USERNAME': self.test_email,
                     'PASSWORD': self.test_password
@@ -114,7 +114,7 @@ class TestSuite:
                 f"{self.config['api_endpoint']}/buckets",
                 headers={
                     'Content-Type': 'application/json',
-                    'Authorization': self.id_token
+                    'Authorization': f'Bearer {self.id_token}'
                 },
                 json={'project_name': test_project}
             )
@@ -139,7 +139,7 @@ class TestSuite:
         try:
             response = requests.get(
                 f"{self.config['api_endpoint']}/buckets",
-                headers={'Authorization': self.id_token}
+                headers={'Authorization': f'Bearer {self.id_token}'}
             )
             
             if response.status_code == 200:
@@ -162,12 +162,24 @@ class TestSuite:
         try:
             s3 = boto3.client('s3', region_name=self.config['region'])
             
+            # Check if bucket exists before trying to delete
+            try:
+                s3.head_bucket(Bucket=bucket_name)
+            except s3.exceptions.NoSuchBucket:
+                print(f"⚠️  Bucket {bucket_name} doesn't exist, skipping healing test")
+                return False
+            
             # Delete the bucket to trigger healing
-            s3.delete_bucket(Bucket=bucket_name)
-            print(f"🗑️  Deleted bucket {bucket_name} to test healing")
+            try:
+                s3.delete_bucket(Bucket=bucket_name)
+                print(f"🗑️  Deleted bucket {bucket_name} to test healing")
+            except Exception as delete_error:
+                print(f"⚠️  Could not delete bucket (may need to be empty first): {delete_error}")
+                print("⏭️  Skipping healing test")
+                return False
             
             # Wait for healing (monitoring runs every 5 minutes)
-            print("⏳ Waiting for healing process (this may take up to 5 minutes)...")
+            print("⏳ Waiting for healing process (this may take up to 10 minutes)...")
             
             for i in range(10):  # Wait up to 10 minutes
                 time.sleep(60)  # Wait 1 minute
@@ -177,14 +189,22 @@ class TestSuite:
                     print(f"✅ Bucket {bucket_name} healed successfully!")
                     return True
                 except s3.exceptions.NoSuchBucket:
-                    print(f"⏳ Still waiting... ({i+1}/10 minutes)")
+                    # Bucket still doesn't exist, continue waiting
+                    if i < 9:  # Don't print on last iteration
+                        print(f"⏳ Still waiting... ({i+1}/10 minutes)")
+                    continue
+                except Exception as check_error:
+                    # Other errors (permissions, etc.)
+                    print(f"⚠️  Error checking bucket: {check_error}")
                     continue
             
-            print("❌ Bucket healing test timed out")
+            print("❌ Bucket healing test timed out (bucket not recreated after 10 minutes)")
             return False
             
         except Exception as e:
             print(f"❌ Healing test error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def test_authentication_failure(self):
@@ -194,7 +214,7 @@ class TestSuite:
         try:
             response = requests.get(
                 f"{self.config['api_endpoint']}/buckets",
-                headers={'Authorization': 'invalid-token'}
+                headers={'Authorization': 'Bearer invalid-token'}
             )
             
             if response.status_code == 401:
@@ -226,7 +246,7 @@ class TestSuite:
                     f"{self.config['api_endpoint']}/buckets",
                     headers={
                         'Content-Type': 'application/json',
-                        'Authorization': self.id_token
+                        'Authorization': f'Bearer {self.id_token}'
                     },
                     json={'project_name': invalid_name}
                 )
