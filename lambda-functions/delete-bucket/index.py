@@ -12,8 +12,20 @@ table = dynamodb.Table(os.environ['TABLE_NAME'])
 user_pool_id = os.environ['USER_POOL_ID']
 region = os.environ.get('REGION', 'us-east-1')
 
-def is_admin(user_email):
-    """Check if user is an admin"""
+def get_user_groups(user_email):
+    """Get list of Cognito groups for a user"""
+    try:
+        response = cognito.admin_list_groups_for_user(
+            UserPoolId=user_pool_id,
+            Username=user_email
+        )
+        return [g['GroupName'] for g in response.get('Groups', [])]
+    except Exception as e:
+        print(f"Error getting user groups: {e}")
+        return []
+
+def is_super_admin(user_email):
+    """Check if user is a Super Admin (admins group)"""
     try:
         # Get admin emails from environment or check Cognito group
         admin_emails_env = os.environ.get('ADMIN_EMAILS', '')
@@ -22,16 +34,24 @@ def is_admin(user_email):
             if user_email in admin_emails:
                 return True
         
-        # Check if user is in admin group
-        response = cognito.admin_list_groups_for_user(
-            UserPoolId=user_pool_id,
-            Username=user_email
-        )
-        groups = [g['GroupName'] for g in response.get('Groups', [])]
+        groups = get_user_groups(user_email)
         return 'admins' in groups
     except Exception as e:
-        print(f"Error checking admin status: {e}")
+        print(f"Error checking super admin status: {e}")
         return False
+
+def is_business_admin(user_email):
+    """Check if user is a Business Admin (business-admins group)"""
+    try:
+        groups = get_user_groups(user_email)
+        return 'business-admins' in groups
+    except Exception as e:
+        print(f"Error checking business admin status: {e}")
+        return False
+
+def is_admin(user_email):
+    """Check if user is any type of admin (Super Admin or Business Admin)"""
+    return is_super_admin(user_email) or is_business_admin(user_email)
 
 def lambda_handler(event, context):
     try:
@@ -68,15 +88,31 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'project_name query parameter is required'})
             }
         
-        # Check if user is admin first
-        is_admin_user = is_admin(user_email) if user_email else False
+        # Check user roles
+        is_super_admin_user = is_super_admin(user_email) if user_email else False
+        is_business_admin_user = is_business_admin(user_email) if user_email else False
+        is_admin_user = is_super_admin_user or is_business_admin_user
         
-        # Get bucket metadata - users can only delete their own buckets
-        # (they only see their own buckets in the list)
+        # Get bucket metadata
+        # For admins and business admins, we need to allow deleting any bucket
+        # First try with user's own bucket key, then if admin, try to find by project name across all users
         bucket_key = f"{user_id}#{project_name}"
         
         try:
             response = table.get_item(Key={'project_name': bucket_key})
+            
+            # If not found and user is admin/business admin, search by project name across all buckets
+            if 'Item' not in response and is_admin_user:
+                # Search by display_name (project name) across all buckets
+                scan_response = table.scan(
+                    FilterExpression='display_name = :display',
+                    ExpressionAttributeValues={':display': project_name}
+                )
+                if scan_response.get('Items'):
+                    # Take first match (or could handle multiple matches if needed)
+                    response = {'Item': scan_response['Items'][0]}
+                    bucket_key = scan_response['Items'][0]['project_name']
+            
             if 'Item' not in response:
                 return {
                     'statusCode': 404,
@@ -105,11 +141,38 @@ def lambda_handler(event, context):
         
         # Check if user is owner
         is_owner = (user_id == bucket_owner_id)
-        # Check if user is admin
-        is_admin_user = is_admin(user_email) if user_email else False
         
-        # Determine if should auto-heal (only if deleted by non-owner, non-admin)
-        should_heal = not (is_owner or is_admin_user)
+        # Authorization check: Non-admins can only delete their own buckets
+        if not is_admin_user and not is_owner:
+            return {
+                'statusCode': 403,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({'error': 'Forbidden: You can only delete your own buckets'})
+            }
+        
+        # Determine should_heal based on hierarchy:
+        # 1. Normal User (owner): should_heal=False
+        # 2. Normal User (other user): should_heal=True (but shouldn't happen due to auth check above)
+        # 3. Business Admin: should_heal=True
+        # 4. Super Admin: should_heal=False
+        if is_owner and not is_admin_user:
+            # Normal user deleting own bucket
+            should_heal = False
+        elif is_business_admin_user:
+            # Business Admin deleting any bucket
+            should_heal = True
+        elif is_super_admin_user:
+            # Super Admin deleting any bucket
+            should_heal = False
+        elif not is_owner and not is_admin_user:
+            # Normal user deleting someone else's bucket (shouldn't reach here, but just in case)
+            should_heal = True
+        else:
+            # Default fallback
+            should_heal = False
         
         # Delete bucket from S3 (must be empty)
         try:

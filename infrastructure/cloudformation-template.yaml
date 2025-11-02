@@ -211,18 +211,28 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref BucketMetadataTable
+          USER_POOL_ID: !Ref CognitoUserPool
       Code:
         S3Bucket: !Sub "${Environment}-lambda-deployment-packages-${AWS::AccountId}"
         S3Key: !Sub "${Environment}-list-buckets.zip"
 
-  # Cognito Admin Group
+  # Cognito Admin Group (Super Admin)
   AdminGroup:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: admins
       UserPoolId: !Ref CognitoUserPool
-      Description: Administrators with full system access
+      Description: Super Administrators with full system access (no auto-heal on delete)
       Precedence: 1
+
+  # Cognito Business Admin Group
+  BusinessAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: business-admins
+      UserPoolId: !Ref CognitoUserPool
+      Description: Business Administrators with access to all buckets and reports (auto-heal on delete)
+      Precedence: 2
 
   # Lambda: Delete Bucket
   DeleteBucketFunction:
