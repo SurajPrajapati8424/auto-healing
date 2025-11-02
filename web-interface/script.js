@@ -273,29 +273,51 @@ async function createBucket() {
     setLoading('createBtn', true);
 
     try {
+        const idToken = localStorage.getItem('idToken');
+        if (!idToken) {
+            showStatus('Please sign in to create buckets', 'error');
+            return;
+        }
+
         const response = await fetch(`${CONFIG.apiEndpoint}/buckets`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': localStorage.getItem('idToken')
+                'Authorization': `Bearer ${idToken}`
             },
             body: JSON.stringify({
                 project_name: projectName
             })
         });
 
+        if (!response.ok) {
+            let errorMessage = 'Failed to create bucket';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            showStatus(`❌ ${errorMessage}`, 'error');
+            return;
+        }
+
         const data = await response.json();
 
-        if (response.ok) {
+        if (data.bucket_name) {
             showStatus(`✅ Bucket created successfully: ${data.bucket_name}`, 'success');
             document.getElementById('projectName').value = '';
             loadBuckets();
         } else {
-            showStatus(`❌ ${data.error || 'Failed to create bucket'}`, 'error');
+            showStatus(`❌ Unexpected response format`, 'error');
         }
     } catch (error) {
         console.error('Create bucket error:', error);
-        showStatus('❌ Network error: Failed to create bucket', 'error');
+        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
+            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
+        } else {
+            showStatus(`❌ Error: ${error.message}`, 'error');
+        }
     } finally {
         setLoading('createBtn', false);
     }
@@ -308,16 +330,35 @@ async function loadBuckets() {
     bucketsList.innerHTML = '<div class="loading">Loading buckets</div>';
 
     try {
+        const idToken = localStorage.getItem('idToken');
+        if (!idToken) {
+            bucketsList.innerHTML = '<p style="color: red;">Please sign in to view buckets</p>';
+            return;
+        }
+
         const response = await fetch(`${CONFIG.apiEndpoint}/buckets`, {
             method: 'GET',
             headers: {
-                'Authorization': localStorage.getItem('idToken')
+                'Authorization': `Bearer ${idToken}`
             }
         });
 
+        if (!response.ok) {
+            let errorMessage = 'Failed to load buckets';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            bucketsList.innerHTML = `<p style="color: red;">❌ ${errorMessage}</p>`;
+            showStatus(`❌ ${errorMessage}`, 'error');
+            return;
+        }
+
         const data = await response.json();
 
-        if (response.ok) {
+        if (Array.isArray(data)) {
             if (data.length === 0) {
                 bucketsList.innerHTML = '<p>No buckets found. Create your first bucket above! 🚀</p>';
             } else {
@@ -336,13 +377,17 @@ async function loadBuckets() {
                 `).join('');
             }
         } else {
-            bucketsList.innerHTML = '<p style="color: red;">❌ Failed to load buckets</p>';
-            showStatus(`❌ ${data.error || 'Failed to load buckets'}`, 'error');
+            bucketsList.innerHTML = '<p style="color: red;">❌ Unexpected response format</p>';
         }
     } catch (error) {
         console.error('Load buckets error:', error);
-        bucketsList.innerHTML = '<p style="color: red;">❌ Network error: Failed to load buckets</p>';
-        showStatus('❌ Network error: Failed to load buckets', 'error');
+        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
+            bucketsList.innerHTML = '<p style="color: red;">❌ Network error: Cannot reach API. Please check your connection and API endpoint.</p>';
+            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
+        } else {
+            bucketsList.innerHTML = `<p style="color: red;">❌ Error: ${error.message}</p>`;
+            showStatus(`❌ Error: ${error.message}`, 'error');
+        }
     } finally {
         setLoading('refreshBtn', false);
     }

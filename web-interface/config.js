@@ -1,8 +1,8 @@
 const CONFIG = {
-    apiEndpoint: 'https://22hk2d3n85.execute-api.us-east-1.amazonaws.com/dev',
+    apiEndpoint: 'https://5w25yx5fig.execute-api.us-east-1.amazonaws.com/dev',
     region: 'us-east-1',
-    userPoolId: 'us-east-1_qXY7TV3D6',
-    userPoolClientId: '34sga1bk0fapg16q2hjt27drtt',
-    identityPoolId: 'us-east-1:0c78f5fa-2769-402d-a471-8ab1c3dcd4f1',
+    userPoolId: 'us-east-1_NMhOEEsBV',
+    userPoolClientId: '1e9d6o6g647tt981b5rv0nssok',
+    identityPoolId: 'us-east-1:542a97f9-125b-4f25-be2e-a5b33a0fa6d2',
     environment: 'dev'
 };
