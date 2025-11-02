@@ -188,15 +188,27 @@ class TestSuite:
                     s3.head_bucket(Bucket=bucket_name)
                     print(f"✅ Bucket {bucket_name} healed successfully!")
                     return True
-                except s3.exceptions.NoSuchBucket:
-                    # Bucket still doesn't exist, continue waiting
-                    if i < 9:  # Don't print on last iteration
-                        print(f"⏳ Still waiting... ({i+1}/10 minutes)")
-                    continue
+                except ClientError as e:
+                    error_code = e.response.get('Error', {}).get('Code', '')
+                    if error_code == '404' or 'NoSuchBucket' in str(e):
+                        # Bucket still doesn't exist, continue waiting
+                        if i < 9:  # Don't print on last iteration
+                            print(f"⏳ Still waiting... ({i+1}/10 minutes)")
+                        continue
+                    else:
+                        # Other errors (permissions, etc.)
+                        print(f"⚠️  Error checking bucket ({error_code}): {e}")
+                        continue
                 except Exception as check_error:
-                    # Other errors (permissions, etc.)
-                    print(f"⚠️  Error checking bucket: {check_error}")
-                    continue
+                    # Check if it's a NoSuchBucket error (boto3 can raise different exceptions)
+                    if '404' in str(check_error) or 'Not Found' in str(check_error) or 'NoSuchBucket' in str(check_error):
+                        if i < 9:
+                            print(f"⏳ Still waiting... ({i+1}/10 minutes)")
+                        continue
+                    else:
+                        # Other errors
+                        print(f"⚠️  Error checking bucket: {check_error}")
+                        continue
             
             print("❌ Bucket healing test timed out (bucket not recreated after 10 minutes)")
             return False
