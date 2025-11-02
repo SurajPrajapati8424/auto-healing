@@ -10,6 +10,10 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, staging, prod]
+  AdminEmails:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of admin email addresses (e.g., admin1@example.com,admin2@example.com)
+    Default: ""
 
 Resources:
   # Cognito User Pool
@@ -110,6 +114,10 @@ Resources:
         - Endpoint: !Ref NotificationEmail
           Protocol: email
 
+  # Note: S3 bucket for Lambda code is managed by the deploy script
+  # It's created outside of CloudFormation to avoid conflicts
+  # Bucket name: ${Environment}-lambda-deployment-packages-${AWS::AccountId}
+
   # IAM Role for Lambda functions
   BucketManagementRole:
     Type: AWS::IAM::Role
@@ -135,6 +143,10 @@ Resources:
                   - s3:DeleteBucket
                   - s3:GetBucketLocation
                   - s3:ListBucket
+                  - s3:ListObjects
+                  - s3:ListObjectsV2
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
                   - s3:PutBucketPublicAccessBlock
                   - s3:PutBucketVersioning
                   - s3:PutBucketEncryption
@@ -156,6 +168,15 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref BucketNotificationTopic
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:ListUsersInGroup
+                Resource: !GetAtt CognitoUserPool.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${Environment}-lambda-deployment-packages-${AWS::AccountId}/*"
 
   # Lambda: Create Bucket (Enhanced)
   CreateBucketFunction:
@@ -174,267 +195,8 @@ Resources:
           ENVIRONMENT: !Ref Environment
           REGION: !Ref AWS::Region
       Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          import uuid
-          import re
-          from datetime import datetime
-
-          s3 = boto3.client('s3')
-          dynamodb = boto3.resource('dynamodb')
-          sns = boto3.client('sns')
-
-          table = dynamodb.Table(os.environ['TABLE_NAME'])
-          topic_arn = os.environ['SNS_TOPIC']
-          environment = os.environ['ENVIRONMENT']
-          region = os.environ.get('REGION', 'us-east-1')
-
-          def lambda_handler(event, context):
-              try:
-                  # Extract user info from Cognito
-                  user_id = None
-                  user_email = None
-                  
-                  if 'requestContext' in event and 'authorizer' in event['requestContext']:
-                      claims = event['requestContext']['authorizer'].get('claims', {})
-                      user_id = claims.get('sub')
-                      user_email = claims.get('email')
-                  
-                  # Validate authentication
-                  if not user_id:
-                      print("ERROR: user_id is None - authorization may have failed")
-                      print(f"Event structure: {json.dumps(event.get('requestContext', {}))}")
-                      return {
-                          'statusCode': 401,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'Unauthorized: User authentication required'})
-                      }
-                  
-                  body = json.loads(event['body']) if isinstance(event['body'], str) else event['body']
-                  
-                  if 'project_name' not in body:
-                      return {
-                          'statusCode': 400,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'project_name is required'})
-                      }
-                  
-                  project_name_raw = body['project_name'].strip()
-                  
-                  # Validate project name BEFORE converting to lowercase
-                  # Check for invalid characters (uppercase, underscores, spaces, etc.)
-                  if not re.match(r'^[a-z0-9-]+$', project_name_raw.lower()):
-                      return {
-                          'statusCode': 400,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'Project name must contain only lowercase letters, numbers, and hyphens'})
-                      }
-                  
-                  # Reject if original contains uppercase (even if lowercase version would be valid)
-                  if project_name_raw != project_name_raw.lower():
-                      return {
-                          'statusCode': 400,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'Project name must contain only lowercase letters, numbers, and hyphens (no uppercase letters allowed)'})
-                      }
-                  
-                  # Now convert to lowercase for storage
-                  project_name = project_name_raw.lower()
-                  
-                  if len(project_name) < 3 or len(project_name) > 50:
-                      return {
-                          'statusCode': 400,
-                          'headers': {'Content-Type': 'application/json'},
-                          'body': json.dumps({'error': 'Project name must be between 3 and 50 characters'})
-                      }
-                  
-                  # Generate unique bucket name
-                  bucket_name = f"{environment}-{project_name}-{str(uuid.uuid4())[:8]}"
-                  
-                  # Check if project already exists for this user
-                  try:
-                      response = table.get_item(Key={'project_name': f"{user_id}#{project_name}"})
-                      if 'Item' in response:
-                          return {
-                              'statusCode': 409,
-                              'headers': {'Content-Type': 'application/json'},
-                              'body': json.dumps({'error': 'Project already exists for this user'})
-                          }
-                  except Exception as e:
-                      print(f"DynamoDB get_item warning: {e}")
-                  
-                  # Create S3 bucket (region-aware)
-                  bucket_created = False
-                  try:
-                      if region == "us-east-1":
-                          s3.create_bucket(Bucket=bucket_name)
-                      else:
-                          s3.create_bucket(
-                              Bucket=bucket_name,
-                              CreateBucketConfiguration={'LocationConstraint': region}
-                          )
-                      bucket_created = True
-                      print(f"Bucket {bucket_name} created successfully")
-                  except Exception as create_error:
-                      print(f"ERROR: Failed to create bucket {bucket_name}: {str(create_error)}")
-                      return {
-                          'statusCode': 500,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'Failed to create bucket', 'details': str(create_error)})
-                      }
-                  
-                  # Configure bucket security (non-blocking - log errors but continue)
-                  config_errors = []
-                  try:
-                      s3.put_public_access_block(
-                          Bucket=bucket_name,
-                          PublicAccessBlockConfiguration={
-                              'BlockPublicAcls': True,
-                              'IgnorePublicAcls': True,
-                              'BlockPublicPolicy': True,
-                              'RestrictPublicBuckets': True
-                          }
-                      )
-                      print(f"Public access block configured for {bucket_name}")
-                  except Exception as config_error:
-                      error_msg = f"Failed to configure public access block: {str(config_error)}"
-                      print(f"WARNING: {error_msg}")
-                      config_errors.append(error_msg)
-                  
-                  # Enable encryption (non-blocking - log errors but continue)
-                  try:
-                      s3.put_bucket_encryption(
-                          Bucket=bucket_name,
-                          ServerSideEncryptionConfiguration={
-                              'Rules': [{
-                                  'ApplyServerSideEncryptionByDefault': {
-                                      'SSEAlgorithm': 'AES256'
-                                  }
-                              }]
-                          }
-                      )
-                      print(f"Encryption configured for {bucket_name}")
-                  except Exception as encrypt_error:
-                      error_msg = f"Failed to configure encryption: {str(encrypt_error)}"
-                      print(f"WARNING: {encrypt_error}")
-                      config_errors.append(error_msg)
-                  
-                  # Store metadata in DynamoDB (CRITICAL - must succeed)
-                  try:
-                      table.put_item(
-                          Item={
-                              'project_name': f"{user_id}#{project_name}",
-                              'bucket_name': bucket_name,
-                              'user_id': user_id,
-                              'user_email': user_email or 'unknown',
-                              'display_name': project_name,
-                              'created_at': datetime.utcnow().isoformat(),
-                              'status': 'active',
-                              'last_checked': datetime.utcnow().isoformat(),
-                              'environment': environment
-                          }
-                      )
-                      print(f"Successfully stored metadata for bucket {bucket_name} with user_id {user_id}")
-                  except Exception as db_error:
-                      # If DynamoDB write fails, this is critical - bucket exists but won't be tracked
-                      print(f"ERROR: Failed to write to DynamoDB: {str(db_error)}")
-                      print(f"WARNING: Bucket {bucket_name} exists but metadata was not stored!")
-                      
-                      # Try to delete the bucket (may fail if bucket is not empty or has configurations)
-                      try:
-                          # First, try to remove any bucket configurations that might prevent deletion
-                          try:
-                              s3.delete_bucket_encryption(Bucket=bucket_name)
-                          except:
-                              pass
-                          try:
-                              s3.delete_public_access_block(Bucket=bucket_name)
-                          except:
-                              pass
-                          
-                          s3.delete_bucket(Bucket=bucket_name)
-                          print(f"Cleaned up bucket {bucket_name} due to DynamoDB failure")
-                      except Exception as cleanup_error:
-                          print(f"WARNING: Could not cleanup bucket {bucket_name}: {str(cleanup_error)}")
-                          print(f"Bucket exists in AWS but not tracked in DynamoDB. Manual cleanup may be required.")
-                      
-                      return {
-                          'statusCode': 500,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({
-                              'error': 'Failed to store bucket metadata', 
-                              'details': str(db_error),
-                              'note': 'Bucket may have been created but is not tracked'
-                          })
-                      }
-                  
-                  # Send notification (non-blocking)
-                  try:
-                      sns.publish(
-                          TopicArn=topic_arn,
-                          Message=f"Bucket {bucket_name} created for project {project_name} by user {user_email}",
-                          Subject="S3 Bucket Created"
-                      )
-                  except Exception as sns_error:
-                      print(f"WARNING: Failed to send SNS notification: {str(sns_error)}")
-                      # Don't fail the request if notification fails
-                  
-                  # ✅ Return useful response for API clients
-                  response_data = {
-                          'project_name': project_name,
-                          'bucket_name': bucket_name,
-                          'status': 'created',
-                          'region': region,
-                          'user': user_email
-                      }
-                  
-                  # Include any configuration warnings if present
-                  if config_errors:
-                      response_data['warnings'] = config_errors
-                      print(f"Bucket created with configuration warnings: {config_errors}")
-                  
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': '*'
-                      },
-                      'body': json.dumps(response_data)
-                  }
-                  
-              except Exception as e:
-                  import traceback
-                  error_details = traceback.format_exc()
-                  print(f"ERROR in create bucket lambda: {str(e)}")
-                  print(f"Traceback: {error_details}")
-                  return {
-                      'statusCode': 500,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': '*'
-                      },
-                      'body': json.dumps({'error': 'Internal server error', 'details': str(e)})
-                  }
+        S3Bucket: !Sub "${Environment}-lambda-deployment-packages-${AWS::AccountId}"
+        S3Key: !Sub "${Environment}-create-bucket.zip"
 
   # Lambda: List Buckets (Enhanced)
   ListBucketsFunction:
@@ -450,92 +212,37 @@ Resources:
         Variables:
           TABLE_NAME: !Ref BucketMetadataTable
       Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          from boto3.dynamodb.conditions import Key
+        S3Bucket: !Sub "${Environment}-lambda-deployment-packages-${AWS::AccountId}"
+        S3Key: !Sub "${Environment}-list-buckets.zip"
 
-          dynamodb = boto3.resource('dynamodb')
-          table = dynamodb.Table(os.environ['TABLE_NAME'])
+  # Cognito Admin Group
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      UserPoolId: !Ref CognitoUserPool
+      Description: Administrators with full system access
+      Precedence: 1
 
-          def lambda_handler(event, context):
-              try:
-                  # Extract user info from Cognito
-                  user_id = None
-                  if 'requestContext' in event and 'authorizer' in event['requestContext']:
-                      claims = event['requestContext']['authorizer']['claims']
-                      user_id = claims.get('sub')
-                  
-                  if not user_id:
-                      return {
-                          'statusCode': 401,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps({'error': 'Unauthorized'})
-                      }
-                  
-                  # Get query parameters
-                  query_params = event.get('queryStringParameters', {}) or {}
-                  project_name = query_params.get('project_name')
-                  
-                  if project_name:
-                      # Get specific project for this user
-                      response = table.get_item(Key={'project_name': f"{user_id}#{project_name}"})
-                      if 'Item' in response:
-                          item = response['Item']
-                          # Remove internal user_id from response
-                          item.pop('user_id', None)
-                          return {
-                              'statusCode': 200,
-                              'headers': {
-                                  'Content-Type': 'application/json',
-                                  'Access-Control-Allow-Origin': '*'
-                              },
-                              'body': json.dumps(item, default=str)
-                          }
-                      else:
-                          return {
-                              'statusCode': 404,
-                              'headers': {
-                                  'Content-Type': 'application/json',
-                                  'Access-Control-Allow-Origin': '*'
-                              },
-                              'body': json.dumps({'error': 'Project not found'})
-                          }
-                  else:
-                      # List all projects for this user
-                      response = table.query(
-                          IndexName='user-id-index',
-                          KeyConditionExpression=Key('user_id').eq(user_id)
-                      )
-                      
-                      items = response['Items']
-                      # Clean up items for response
-                      for item in items:
-                          item.pop('user_id', None)
-                      
-                      return {
-                          'statusCode': 200,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': '*'
-                          },
-                          'body': json.dumps(items, default=str)
-                      }
-                      
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': '*'
-                      },
-                      'body': json.dumps({'error': 'Internal server error', 'details': str(e)})
-                  }
+  # Lambda: Delete Bucket
+  DeleteBucketFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-delete-bucket"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt BucketManagementRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref BucketMetadataTable
+          USER_POOL_ID: !Ref CognitoUserPool
+          REGION: !Ref AWS::Region
+          ADMIN_EMAILS: !Join [',', !Ref AdminEmails]
+      Code:
+        S3Bucket: !Sub "${Environment}-lambda-deployment-packages-${AWS::AccountId}"
+        S3Key: !Sub "${Environment}-delete-bucket.zip"
 
   # Lambda: Monitor and Heal Buckets (Enhanced)
   MonitorBucketsFunction:
@@ -554,200 +261,8 @@ Resources:
           ENVIRONMENT: !Ref Environment
           REGION: !Ref AWS::Region
       Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-          from datetime import datetime
-          from botocore.exceptions import ClientError
-
-          s3 = boto3.client('s3')
-          dynamodb = boto3.resource('dynamodb')
-          sns = boto3.client('sns')
-
-          table = dynamodb.Table(os.environ['TABLE_NAME'])
-          topic_arn = os.environ['SNS_TOPIC']
-          environment = os.environ['ENVIRONMENT']
-          region = os.environ.get('REGION', 'us-east-1')
-
-          def lambda_handler(event, context):
-              processed_buckets = 0
-              healed_buckets = 0
-              
-              try:
-                  # Scan all active buckets
-                  response = table.scan(
-                      FilterExpression='#status = :status',
-                      ExpressionAttributeNames={'#status': 'status'},
-                      ExpressionAttributeValues={':status': 'active'}
-                  )
-                  
-                  for item in response['Items']:
-                      bucket_name = item['bucket_name']
-                      project_name = item['project_name']
-                      user_email = item.get('user_email', 'unknown')
-                      display_name = item.get('display_name', project_name)
-                      
-                      processed_buckets += 1
-                      
-                      try:
-                          # Check if bucket exists
-                          s3.head_bucket(Bucket=bucket_name)
-                          
-                          # Update last_checked
-                          table.update_item(
-                              Key={'project_name': project_name},
-                              UpdateExpression='SET last_checked = :timestamp',
-                              ExpressionAttributeValues={
-                                  ':timestamp': datetime.utcnow().isoformat()
-                              }
-                          )
-                          
-                      except ClientError as e:
-                          # Extract error code from boto3 ClientError
-                          error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                          error_message = str(e)
-                          
-                          # Check if bucket doesn't exist (404, NoSuchBucket, or NotFound)
-                          if (error_code in ('404', 'NoSuchBucket', 'NotFound') or 
-                              '404' in error_message or 
-                              'Not Found' in error_message or
-                              'NoSuchBucket' in error_message):
-                              print(f"Detected missing bucket {bucket_name}, initiating healing...")
-                              if recreate_bucket(bucket_name, project_name, user_email, display_name):
-                                  healed_buckets += 1
-                                  print(f"Successfully healed bucket {bucket_name}")
-                              else:
-                                  print(f"Failed to heal bucket {bucket_name}")
-                          else:
-                              print(f"Error checking bucket {bucket_name}: {error_code} - {error_message}")
-                      except Exception as e:
-                          # Handle other exceptions (including s3.exceptions.NoSuchBucket)
-                          error_message = str(e)
-                          if ('404' in error_message or 
-                              'Not Found' in error_message or 
-                              'NoSuchBucket' in error_message or
-                              hasattr(e, '__class__') and 'NoSuchBucket' in str(e.__class__)):
-                              print(f"Detected missing bucket {bucket_name}, initiating healing...")
-                              if recreate_bucket(bucket_name, project_name, user_email, display_name):
-                                  healed_buckets += 1
-                                  print(f"Successfully healed bucket {bucket_name}")
-                              else:
-                                  print(f"Failed to heal bucket {bucket_name}")
-                          else:
-                              print(f" Unexpected error checking bucket {bucket_name}: {error_message}")
-                  
-                  return {
-                      'statusCode': 200,
-                      'body': json.dumps({
-                          'message': 'Monitoring completed',
-                          'processed_buckets': processed_buckets,
-                          'healed_buckets': healed_buckets
-                      })
-                  }
-                  
-              except Exception as e:
-                  print(f"Error in monitoring: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({'error': str(e)})
-                  }
-
-          def recreate_bucket(bucket_name, project_name, user_email, display_name):
-              try:
-                  print(f"Attempting to recreate bucket {bucket_name}...")
-                  
-                  # Recreate bucket (region-aware)
-                  try:
-                      if region == "us-east-1":
-                          s3.create_bucket(Bucket=bucket_name)
-                      else:
-                          s3.create_bucket(
-                              Bucket=bucket_name,
-                              CreateBucketConfiguration={'LocationConstraint': region}
-                          )
-                      print(f"Bucket {bucket_name} created")
-                  except s3.exceptions.BucketAlreadyExists:
-                      print(f"Bucket {bucket_name} already exists (may have been recreated by another process)")
-                      # Bucket exists, continue with configuration
-                  except s3.exceptions.BucketAlreadyOwnedByYou:
-                      print(f"Bucket {bucket_name} already owned by you")
-                      # Bucket exists, continue with configuration
-                  except Exception as create_error:
-                      error_msg = str(create_error)
-                      # Check if it's a name availability issue
-                      if "BucketAlreadyExists" in error_msg or "AlreadyOwnedByYou" in error_msg:
-                          print(f"Bucket {bucket_name} already exists, continuing with configuration")
-                      else:
-                          raise  # Re-raise if it's a different error
-                  
-                  # Configure security (non-blocking)
-                  try:
-                      s3.put_bucket_public_access_block(
-                          Bucket=bucket_name,
-                          PublicAccessBlockConfiguration={
-                              'BlockPublicAcls': True,
-                              'IgnorePublicAcls': True,
-                              'BlockPublicPolicy': True,
-                              'RestrictPublicBuckets': True
-                          }
-                      )
-                      print(f"Public access block configured for {bucket_name}")
-                  except Exception as config_error:
-                      print(f"WARNING: Failed to configure public access block: {str(config_error)}")
-                  
-                  # Enable encryption (non-blocking)
-                  try:
-                      s3.put_bucket_encryption(
-                          Bucket=bucket_name,
-                          ServerSideEncryptionConfiguration={
-                              'Rules': [{
-                                  'ApplyServerSideEncryptionByDefault': {
-                                      'SSEAlgorithm': 'AES256'
-                                  }
-                              }]
-                          }
-                      )
-                      print(f"Encryption configured for {bucket_name}")
-                  except Exception as encrypt_error:
-                      print(f"WARNING: Failed to configure encryption: {str(encrypt_error)}")
-                  
-                  # Update metadata
-                  try:
-                      table.update_item(
-                          Key={'project_name': project_name},
-                          UpdateExpression='SET last_checked = :timestamp, healed_at = :timestamp, heal_count = if_not_exists(heal_count, :zero) + :one',
-                          ExpressionAttributeValues={
-                              ':timestamp': datetime.utcnow().isoformat(),
-                              ':zero': 0,
-                              ':one': 1
-                          }
-                      )
-                      print(f"DynamoDB updated for {bucket_name}")
-                  except Exception as db_error:
-                      print(f"ERROR: Failed to update DynamoDB: {str(db_error)}")
-                      # Don't fail healing if DynamoDB update fails, bucket was recreated
-                  
-                  # Send healing notification (non-blocking)
-                  try:
-                      sns.publish(
-                          TopicArn=topic_arn,
-                          Message=f"Bucket {bucket_name} for project '{display_name}' was automatically recreated.\n\nUser: {user_email}\nTime: {datetime.utcnow().isoformat()}\n\nThe bucket was deleted and has been restored with the same configuration.",
-                          Subject=f"S3 Bucket Healed - {display_name}"
-                      )
-                      print(f"Notification sent for {bucket_name}")
-                  except Exception as sns_error:
-                      print(f"WARNING: Failed to send notification: {str(sns_error)}")
-                  
-                  print(f"Bucket {bucket_name} healed successfully")
-                  return True
-                  
-              except Exception as e:
-                  import traceback
-                  error_trace = traceback.format_exc()
-                  print(f"ERROR recreating bucket {bucket_name}: {str(e)}")
-                  print(f"Traceback: {error_trace}")
-                  return False
+        S3Bucket: !Sub "${Environment}-lambda-deployment-packages-${AWS::AccountId}"
+        S3Key: !Sub "${Environment}-monitor-buckets.zip"
 
   # API Gateway
   BucketManagementAPI:
@@ -858,6 +373,21 @@ Resources:
           - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
           - LambdaArn: !GetAtt ListBucketsFunction.Arn
 
+  DeleteBucketMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BucketManagementAPI
+      ResourceId: !Ref BucketsResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt DeleteBucketFunction.Arn
+
   # Lambda permissions for API Gateway
   CreateBucketPermission:
     Type: AWS::Lambda::Permission
@@ -875,12 +405,21 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BucketManagementAPI}/*/GET/buckets"
 
+  DeleteBucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeleteBucketFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BucketManagementAPI}/*/DELETE/buckets"
+
   # API Gateway Deployment
   APIDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - CreateBucketMethod
       - ListBucketsMethod
+      - DeleteBucketMethod
       - BucketsOptionsMethod
       - CorsOptionsMethod
     Properties:

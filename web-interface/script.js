@@ -362,9 +362,13 @@ async function loadBuckets() {
             if (data.length === 0) {
                 bucketsList.innerHTML = '<p>No buckets found. Create your first bucket above! 🚀</p>';
             } else {
-                bucketsList.innerHTML = data.map(bucket => `
-                    <div class="bucket-item">
-                        <h3>📦 ${bucket.display_name || bucket.project_name}</h3>
+                bucketsList.innerHTML = data.map(bucket => {
+                    const projectName = bucket.display_name || bucket.project_name;
+                    // Escape HTML to prevent XSS
+                    const escapedProjectName = projectName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    return `
+                    <div class="bucket-item" id="bucket-${escapedProjectName.replace(/[^a-z0-9-]/gi, '_')}">
+                        <h3>📦 ${projectName}</h3>
                         <div class="bucket-info">
                             <div><strong>Bucket Name:</strong> <code>${bucket.bucket_name}</code></div>
                             <div><strong>Status:</strong> <span style="color: ${bucket.status === 'active' ? 'green' : 'orange'}">${bucket.status}</span></div>
@@ -372,9 +376,15 @@ async function loadBuckets() {
                             <div><strong>Last Checked:</strong> ${formatDate(bucket.last_checked)}</div>
                             ${bucket.healed_at ? `<div><strong>Last Healed:</strong> ${formatDate(bucket.healed_at)}</div>` : ''}
                             ${bucket.heal_count ? `<div><strong>Heal Count:</strong> ${bucket.heal_count}</div>` : ''}
+                            <div style="margin-top: 10px;">
+                                <button onclick="deleteBucket('${escapedProjectName}')" class="button-danger" style="float: right;">
+                                    🗑️ Delete Bucket
+                                </button>
+                            </div>
                         </div>
                     </div>
-                `).join('');
+                `;
+                }).join('');
             }
         } else {
             bucketsList.innerHTML = '<p style="color: red;">❌ Unexpected response format</p>';
@@ -390,6 +400,64 @@ async function loadBuckets() {
         }
     } finally {
         setLoading('refreshBtn', false);
+    }
+}
+
+async function deleteBucket(projectName) {
+    // Confirm deletion
+    if (!confirm(`Are you sure you want to delete the bucket for project "${projectName}"?\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const idToken = localStorage.getItem('idToken');
+        if (!idToken) {
+            showStatus('Please sign in to delete buckets', 'error');
+            return;
+        }
+
+        const response = await fetch(`${CONFIG.apiEndpoint}/buckets?project_name=${encodeURIComponent(projectName)}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${idToken}`
+            }
+        });
+
+        if (!response.ok) {
+            let errorMessage = 'Failed to delete bucket';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            showStatus(`❌ ${errorMessage}`, 'error');
+            return;
+        }
+
+        const data = await response.json();
+        
+        if (data.message) {
+            let message = `✅ ${data.message}`;
+            if (data.should_heal === false) {
+                message += ' (Note: This bucket will NOT be auto-healed because you are the owner/admin)';
+            } else {
+                message += ' (Note: This bucket will be auto-healed if deleted by another user)';
+            }
+            showStatus(message, 'success');
+            // Reload buckets list
+            loadBuckets();
+        } else {
+            showStatus('✅ Bucket deleted successfully', 'success');
+            loadBuckets();
+        }
+    } catch (error) {
+        console.error('Delete bucket error:', error);
+        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
+            showStatus('❌ Network error: Cannot reach API', 'error');
+        } else {
+            showStatus(`❌ Error: ${error.message}`, 'error');
+        }
     }
 }
 
