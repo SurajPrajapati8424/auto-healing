@@ -9,13 +9,106 @@ AWS.config.update({
 const cognitoUser = new AWS.CognitoIdentityServiceProvider();
 let currentUser = null;
 let currentSession = null;
+let bucketsData = []; // Store buckets data for sorting
 
 // Initialize the app
 document.addEventListener('DOMContentLoaded', function() {
     checkAuthState();
     // showAppSection();   // Force show the app section
     // document.getElementById('userName').textContent = "Demo User";
+    
+    // Setup lifecycle policy description updates
+    const lifecycleSelect = document.getElementById('lifecyclePolicy');
+    if (lifecycleSelect) {
+        lifecycleSelect.addEventListener('change', updateLifecycleDescription);
+        updateLifecycleDescription(); // Initialize description
+    }
 });
+
+function updateLifecycleDescription() {
+    const select = document.getElementById('lifecyclePolicy');
+    const descriptionSpan = document.getElementById('lifecycleDescription');
+    if (!select || !descriptionSpan) return;
+    
+    const value = select.value;
+    let description = '';
+    
+    switch(value) {
+        case 'Auto-Archive':
+            description = 'Objects will automatically transition to S3 Glacier after 30 days to reduce storage costs';
+            break;
+        case 'Auto-Delete':
+            description = 'Noncurrent versions will be automatically deleted after 90 days to manage storage costs';
+            break;
+        case 'Custom':
+            description = 'Define your own lifecycle rules using JSON. Advanced users only.';
+            break;
+        default:
+            description = 'No automatic lifecycle rules will be applied';
+    }
+    
+    descriptionSpan.textContent = description;
+}
+
+function toggleCustomPolicy() {
+    const select = document.getElementById('lifecyclePolicy');
+    const customSection = document.getElementById('customPolicySection');
+    
+    if (select && customSection) {
+        if (select.value === 'Custom') {
+            customSection.style.display = 'block';
+        } else {
+            customSection.style.display = 'none';
+            document.getElementById('customPolicyJson').value = '';
+        }
+        updateLifecycleDescription();
+    }
+}
+
+function validateCustomPolicy() {
+    const jsonText = document.getElementById('customPolicyJson').value.trim();
+    
+    if (!jsonText) {
+        showStatus('Please enter a lifecycle policy JSON', 'error');
+        return false;
+    }
+    
+    try {
+        const policy = JSON.parse(jsonText);
+        
+        // Basic validation - check for required structure
+        if (!policy.Rules || !Array.isArray(policy.Rules) || policy.Rules.length === 0) {
+            showStatus('Invalid policy: Must contain a "Rules" array with at least one rule', 'error');
+            return false;
+        }
+        
+        // Validate each rule has required fields
+        for (let i = 0; i < policy.Rules.length; i++) {
+            const rule = policy.Rules[i];
+            // Accept both 'Id' and 'ID' but note that AWS requires 'ID' (uppercase)
+            const ruleId = rule.ID || rule.Id;
+            if (!ruleId || !rule.Status) {
+                showStatus(`Invalid rule at index ${i}: Must have "ID" (or "Id") and "Status" fields`, 'error');
+                return false;
+            }
+            if (rule.Status !== 'Enabled' && rule.Status !== 'Disabled') {
+                showStatus(`Invalid rule at index ${i}: Status must be "Enabled" or "Disabled"`, 'error');
+                return false;
+            }
+            // Normalize to uppercase ID if lowercase Id was provided
+            if (rule.Id && !rule.ID) {
+                rule.ID = rule.Id;
+                delete rule.Id;
+            }
+        }
+        
+        showStatus('✅ Valid JSON policy!', 'success');
+        return true;
+    } catch (e) {
+        showStatus(`Invalid JSON: ${e.message}`, 'error');
+        return false;
+    }
+}
 
 function showStatus(message, type = 'info') {
     const statusDiv = document.getElementById('status');
@@ -279,15 +372,34 @@ async function createBucket() {
             return;
         }
 
+        // Get bucket configuration options
+        const enableVersioning = document.getElementById('enableVersioning').value;
+        const lifecyclePolicy = document.getElementById('lifecyclePolicy').value;
+        
+        // Prepare request body
+        const requestBody = {
+            project_name: projectName,
+            versioning: enableVersioning,
+            lifecycle_policy: lifecyclePolicy
+        };
+        
+        // If custom policy, validate and include the JSON
+        if (lifecyclePolicy === 'Custom') {
+            const customJson = document.getElementById('customPolicyJson').value.trim();
+            if (!validateCustomPolicy()) {
+                setLoading('createBtn', false);
+                return; // Don't create if validation fails
+            }
+            requestBody.custom_lifecycle_config = JSON.parse(customJson);
+        }
+        
         const response = await fetch(`${CONFIG.apiEndpoint}/buckets`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${idToken}`
             },
-            body: JSON.stringify({
-                project_name: projectName
-            })
+            body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {
@@ -361,8 +473,114 @@ async function loadBuckets() {
         if (Array.isArray(data)) {
             if (data.length === 0) {
                 bucketsList.innerHTML = '<p>No buckets found. Create your first bucket above! 🚀</p>';
+                bucketsData = [];
             } else {
-                bucketsList.innerHTML = data.map(bucket => {
+                // Store the data for filtering and sorting
+                bucketsData = data;
+                // Apply current filters and sort (or default to newest first)
+                const sortBy = document.getElementById('sortBy')?.value || 'newest';
+                if (document.getElementById('sortBy')) {
+                    document.getElementById('sortBy').value = sortBy;
+                }
+                applyFilters();
+            }
+        } else {
+            bucketsList.innerHTML = '<p style="color: red;">❌ Unexpected response format</p>';
+            bucketsData = [];
+        }
+    } catch (error) {
+        console.error('Load buckets error:', error);
+        bucketsData = [];
+        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
+            bucketsList.innerHTML = '<p style="color: red;">❌ Network error: Cannot reach API. Please check your connection and API endpoint.</p>';
+            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
+        } else {
+            bucketsList.innerHTML = `<p style="color: red;">❌ Error: ${error.message}</p>`;
+            showStatus(`❌ Error: ${error.message}`, 'error');
+        }
+    } finally {
+        setLoading('refreshBtn', false);
+    }
+}
+
+function applyFilters() {
+    if (bucketsData.length === 0) return;
+    
+    // First apply status filter
+    const statusFilter = document.getElementById('statusFilter').value;
+    let filteredBuckets = [...bucketsData];
+    
+    if (statusFilter !== 'all') {
+        filteredBuckets = filteredBuckets.filter(bucket => {
+            const status = (bucket.status || 'active').toLowerCase();
+            return status === statusFilter.toLowerCase();
+        });
+    }
+    
+    // Then apply sorting
+    const sortBy = document.getElementById('sortBy').value;
+    let sortedBuckets = [...filteredBuckets];
+    
+    switch(sortBy) {
+        case 'newest':
+            sortedBuckets.sort((a, b) => {
+                const dateA = new Date(a.created_at || 0);
+                const dateB = new Date(b.created_at || 0);
+                return dateB - dateA; // Newest first
+            });
+            break;
+        case 'oldest':
+            sortedBuckets.sort((a, b) => {
+                const dateA = new Date(a.created_at || 0);
+                const dateB = new Date(b.created_at || 0);
+                return dateA - dateB; // Oldest first
+            });
+            break;
+        case 'name-asc':
+            sortedBuckets.sort((a, b) => {
+                const nameA = (a.display_name || a.project_name || '').toLowerCase();
+                const nameB = (b.display_name || b.project_name || '').toLowerCase();
+                return nameA.localeCompare(nameB);
+            });
+            break;
+        case 'name-desc':
+            sortedBuckets.sort((a, b) => {
+                const nameA = (a.display_name || a.project_name || '').toLowerCase();
+                const nameB = (b.display_name || b.project_name || '').toLowerCase();
+                return nameB.localeCompare(nameA);
+            });
+            break;
+        case 'status':
+            sortedBuckets.sort((a, b) => {
+                const statusA = a.status || 'unknown';
+                const statusB = b.status || 'unknown';
+                // Active first, then deleted
+                if (statusA === 'active' && statusB !== 'active') return -1;
+                if (statusA !== 'active' && statusB === 'active') return 1;
+                return statusA.localeCompare(statusB);
+            });
+            break;
+        default:
+            // Default to newest first
+            sortedBuckets.sort((a, b) => {
+                const dateA = new Date(a.created_at || 0);
+                const dateB = new Date(b.created_at || 0);
+                return dateB - dateA;
+            });
+    }
+    
+    displayBuckets(sortedBuckets);
+}
+
+function displayBuckets(buckets) {
+    const bucketsList = document.getElementById('bucketsList');
+    
+    if (buckets.length === 0) {
+        bucketsList.innerHTML = '<p>No buckets found. Create your first bucket above! 🚀</p>';
+        return;
+    }
+    
+    bucketsList.innerHTML = buckets.map(bucket => {
                     const projectName = bucket.display_name || bucket.project_name;
                     // Escape HTML to prevent XSS
                     const escapedProjectName = projectName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
@@ -385,22 +603,6 @@ async function loadBuckets() {
                     </div>
                 `;
                 }).join('');
-            }
-        } else {
-            bucketsList.innerHTML = '<p style="color: red;">❌ Unexpected response format</p>';
-        }
-    } catch (error) {
-        console.error('Load buckets error:', error);
-        if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
-            bucketsList.innerHTML = '<p style="color: red;">❌ Network error: Cannot reach API. Please check your connection and API endpoint.</p>';
-            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
-        } else {
-            bucketsList.innerHTML = `<p style="color: red;">❌ Error: ${error.message}</p>`;
-            showStatus(`❌ Error: ${error.message}`, 'error');
-        }
-    } finally {
-        setLoading('refreshBtn', false);
-    }
 }
 
 async function deleteBucket(projectName) {

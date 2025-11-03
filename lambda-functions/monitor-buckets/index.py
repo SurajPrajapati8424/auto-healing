@@ -207,6 +207,22 @@ def recreate_bucket(bucket_name, project_name, user_email, display_name, deletio
         if deletion_info:
             print(f"  Preserving deletion history: {deletion_info}")
         
+        # Get stored bucket configuration from DynamoDB
+        try:
+            db_item = table.get_item(Key={'project_name': project_name})
+            item_data = db_item.get('Item', {})
+            stored_versioning = item_data.get('versioning', 'Enabled')
+            stored_lifecycle_policy = item_data.get('lifecycle_policy', 'None')
+            stored_custom_lifecycle_config = item_data.get('custom_lifecycle_config')
+            print(f"  Restoring bucket configuration: versioning={stored_versioning}, lifecycle_policy={stored_lifecycle_policy}")
+            if stored_lifecycle_policy == 'Custom':
+                print(f"  Custom lifecycle config found: {bool(stored_custom_lifecycle_config)}")
+        except Exception as db_read_error:
+            print(f"WARNING: Could not read bucket configuration from DynamoDB: {str(db_read_error)}")
+            stored_versioning = 'Enabled'  # Default to enabled
+            stored_lifecycle_policy = 'None'  # Default to none
+            stored_custom_lifecycle_config = None
+        
         # Recreate bucket (region-aware)
         try:
             if region == "us-east-1":
@@ -261,6 +277,78 @@ def recreate_bucket(bucket_name, project_name, user_email, display_name, deletio
             print(f"Encryption configured for {bucket_name}")
         except Exception as encrypt_error:
             print(f"WARNING: Failed to configure encryption: {str(encrypt_error)}")
+        
+        # Restore versioning (non-blocking)
+        if stored_versioning == 'Enabled':
+            try:
+                s3.put_bucket_versioning(
+                    Bucket=bucket_name,
+                    VersioningConfiguration={
+                        'Status': 'Enabled'
+                    }
+                )
+                print(f"Versioning restored (Enabled) for {bucket_name}")
+            except Exception as version_error:
+                print(f"WARNING: Failed to restore versioning: {str(version_error)}")
+        
+        # Restore lifecycle policy (non-blocking)
+        if stored_lifecycle_policy != 'None':
+            try:
+                lifecycle_config = None
+                
+                if stored_lifecycle_policy == 'Custom':
+                    # Restore custom lifecycle configuration
+                    if stored_custom_lifecycle_config:
+                        lifecycle_config = stored_custom_lifecycle_config
+                        if not isinstance(lifecycle_config, dict) or 'Rules' not in lifecycle_config:
+                            raise ValueError("Custom lifecycle config must be a dict with 'Rules' key")
+                        
+                        # Normalize 'Id' to 'ID' in all rules (AWS requires uppercase)
+                        if isinstance(lifecycle_config.get('Rules'), list):
+                            for rule in lifecycle_config['Rules']:
+                                if 'Id' in rule and 'ID' not in rule:
+                                    rule['ID'] = rule.pop('Id')
+                        
+                        print(f"Custom lifecycle policy restored for {bucket_name}")
+                    else:
+                        print(f"WARNING: Custom lifecycle policy specified but config not found in DynamoDB for {bucket_name}")
+                        lifecycle_config = None
+                
+                elif stored_lifecycle_policy == 'Auto-Archive':
+                    # Transition objects to Glacier after 30 days
+                    lifecycle_config = {'Rules': []}
+                    lifecycle_config['Rules'].append({
+                        'ID': 'AutoArchiveRule',
+                        'Status': 'Enabled',
+                        'Filter': {},
+                        'Transitions': [{
+                            'Days': 30,
+                            'StorageClass': 'GLACIER'
+                        }]
+                    })
+                    print(f"Auto-Archive lifecycle policy restored for {bucket_name} (transition to Glacier after 30 days)")
+                
+                elif stored_lifecycle_policy == 'Auto-Delete':
+                    # Delete noncurrent versions after 90 days
+                    lifecycle_config = {'Rules': []}
+                    lifecycle_config['Rules'].append({
+                        'ID': 'AutoDeleteVersionsRule',
+                        'Status': 'Enabled',
+                        'Filter': {},
+                        'NoncurrentVersionExpiration': {
+                            'NoncurrentDays': 90
+                        }
+                    })
+                    print(f"Auto-Delete lifecycle policy restored for {bucket_name} (delete noncurrent versions after 90 days)")
+                
+                if lifecycle_config and lifecycle_config.get('Rules'):
+                    s3.put_bucket_lifecycle_configuration(
+                        Bucket=bucket_name,
+                        LifecycleConfiguration=lifecycle_config
+                    )
+                    print(f"Lifecycle policy restored for {bucket_name}")
+            except Exception as lifecycle_error:
+                print(f"WARNING: Failed to restore lifecycle policy: {str(lifecycle_error)}")
         
         # Update metadata - restore bucket to active status but preserve deletion history for auditing
         try:

@@ -92,11 +92,68 @@
                     <small>Only lowercase letters, numbers, and hyphens allowed (3-50 characters)</small>
                 </div>
                 
+                <div class="bucket-config-section">
+                    <h3>Bucket Configuration</h3>
+                    
+                    <div class="form-group">
+                        <label for="enableVersioning">Enable Versioning:</label>
+                        <select id="enableVersioning">
+                            <option value="Enabled" selected>Yes (Recommended)</option>
+                            <option value="Disabled">No</option>
+                        </select>
+                        <small>Keeps multiple versions of objects, helps protect against accidental deletion or overwriting</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="lifecyclePolicy">Storage Lifecycle:</label>
+                        <select id="lifecyclePolicy" onchange="toggleCustomPolicy()">
+                            <option value="None" selected>None</option>
+                            <option value="Auto-Archive">Auto-Archive (Cost Optimization)</option>
+                            <option value="Auto-Delete">Auto-Delete Old Versions</option>
+                            <option value="Custom">Custom Policy (Advanced)</option>
+                        </select>
+                        <small>
+                            <span id="lifecycleDescription">
+                                No automatic lifecycle rules will be applied
+                            </span>
+                        </small>
+                    </div>
+                    
+                    <div id="customPolicySection" style="display: none;" class="form-group">
+                        <label for="customPolicyJson">Custom Lifecycle Policy (JSON):</label>
+                        <textarea id="customPolicyJson" rows="10" placeholder='{"Rules": [{"Id": "MyRule", "Status": "Enabled", "Filter": {}, "Transitions": [{"Days": 30, "StorageClass": "GLACIER"}]}]}'></textarea>
+                        <small>Enter a valid S3 lifecycle configuration JSON. See AWS documentation for format requirements.</small>
+                        <button type="button" onclick="validateCustomPolicy()" class="button-secondary" style="margin-top: 8px;">Validate JSON</button>
+                    </div>
+                </div>
+                
                 <button onclick="createBucket()" id="createBtn">Create Bucket</button>
                 <button onclick="loadBuckets()" id="refreshBtn" class="button-secondary">Refresh List</button>
                 
                 <div class="bucket-list">
-                    <h2>Your Buckets</h2>
+                    <div class="bucket-list-header">
+                        <h2 style="margin: 0;">Your Buckets</h2>
+                        <div class="bucket-controls">
+                            <div class="sort-controls">
+                                <label for="statusFilter">Filter:</label>
+                                <select id="statusFilter" onchange="applyFilters()">
+                                    <option value="all" selected>All</option>
+                                    <option value="active">Active</option>
+                                    <option value="deleted">Deleted</option>
+                                </select>
+                            </div>
+                            <div class="sort-controls">
+                                <label for="sortBy">Sort by:</label>
+                                <select id="sortBy" onchange="applyFilters()">
+                                    <option value="newest" selected>Newest First</option>
+                                    <option value="oldest">Oldest First</option>
+                                    <option value="name-asc">Name (A-Z)</option>
+                                    <option value="name-desc">Name (Z-A)</option>
+                                    <option value="status">Status</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
                     <div id="bucketsList"></div>
                 </div>
             </div>

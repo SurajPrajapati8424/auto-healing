@@ -151,6 +151,9 @@ Resources:
                   - s3:PutBucketVersioning
                   - s3:PutBucketEncryption
                   - s3:PutEncryptionConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:GetBucketVersioning
+                  - s3:GetLifecycleConfiguration
                   - s3:HeadBucket
                 Resource: "*"
               - Effect: Allow

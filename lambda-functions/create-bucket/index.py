@@ -50,6 +50,30 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'project_name is required'})
             }
         
+        # Get bucket configuration (defaults to recommended values)
+        versioning = body.get('versioning', 'Enabled')
+        lifecycle_policy = body.get('lifecycle_policy', 'None')
+        custom_lifecycle_config = body.get('custom_lifecycle_config')
+        
+        # Validate versioning value
+        if versioning not in ['Enabled', 'Disabled']:
+            versioning = 'Enabled'
+        
+        # Validate lifecycle_policy value
+        if lifecycle_policy not in ['None', 'Auto-Archive', 'Auto-Delete', 'Custom']:
+            lifecycle_policy = 'None'
+        
+        # If Custom policy is selected, ensure custom config is provided
+        if lifecycle_policy == 'Custom' and not custom_lifecycle_config:
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({'error': 'Custom lifecycle policy requires custom_lifecycle_config field'})
+            }
+        
         project_name_raw = body['project_name'].strip()
         
         # Validate project name BEFORE converting to lowercase
@@ -159,6 +183,77 @@ def lambda_handler(event, context):
             print(f"WARNING: {encrypt_error}")
             config_errors.append(error_msg)
         
+        # Enable versioning (non-blocking - log errors but continue)
+        if versioning == 'Enabled':
+            try:
+                s3.put_bucket_versioning(
+                    Bucket=bucket_name,
+                    VersioningConfiguration={
+                        'Status': 'Enabled'
+                    }
+                )
+                print(f"Versioning enabled for {bucket_name}")
+            except Exception as version_error:
+                error_msg = f"Failed to enable versioning: {str(version_error)}"
+                print(f"WARNING: {error_msg}")
+                config_errors.append(error_msg)
+        
+        # Apply lifecycle policy (non-blocking - log errors but continue)
+        if lifecycle_policy != 'None':
+            try:
+                lifecycle_config = None
+                
+                if lifecycle_policy == 'Custom':
+                    # Use the provided custom configuration
+                    lifecycle_config = custom_lifecycle_config
+                    if not isinstance(lifecycle_config, dict) or 'Rules' not in lifecycle_config:
+                        raise ValueError("Custom lifecycle config must be a dict with 'Rules' key")
+                    
+                    # Normalize 'Id' to 'ID' in all rules (AWS requires uppercase)
+                    if isinstance(lifecycle_config.get('Rules'), list):
+                        for rule in lifecycle_config['Rules']:
+                            if 'Id' in rule and 'ID' not in rule:
+                                rule['ID'] = rule.pop('Id')
+                    
+                    print(f"Custom lifecycle policy configured for {bucket_name}")
+                    
+                elif lifecycle_policy == 'Auto-Archive':
+                    # Transition objects to Glacier after 30 days
+                    lifecycle_config = {'Rules': []}
+                    lifecycle_config['Rules'].append({
+                        'ID': 'AutoArchiveRule',
+                        'Status': 'Enabled',
+                        'Filter': {},
+                        'Transitions': [{
+                            'Days': 30,
+                            'StorageClass': 'GLACIER'
+                        }]
+                    })
+                    print(f"Auto-Archive lifecycle policy configured for {bucket_name} (transition to Glacier after 30 days)")
+                
+                elif lifecycle_policy == 'Auto-Delete':
+                    # Delete noncurrent versions after 90 days
+                    lifecycle_config = {'Rules': []}
+                    lifecycle_config['Rules'].append({
+                        'ID': 'AutoDeleteVersionsRule',
+                        'Status': 'Enabled',
+                        'Filter': {},
+                        'NoncurrentVersionExpiration': {
+                            'NoncurrentDays': 90
+                        }
+                    })
+                    print(f"Auto-Delete lifecycle policy configured for {bucket_name} (delete noncurrent versions after 90 days)")
+                
+                if lifecycle_config and lifecycle_config.get('Rules'):
+                    s3.put_bucket_lifecycle_configuration(
+                        Bucket=bucket_name,
+                        LifecycleConfiguration=lifecycle_config
+                    )
+            except Exception as lifecycle_error:
+                error_msg = f"Failed to configure lifecycle policy: {str(lifecycle_error)}"
+                print(f"WARNING: {error_msg}")
+                config_errors.append(error_msg)
+        
         # Store metadata in DynamoDB (CRITICAL - must succeed)
         try:
             table.put_item(
@@ -171,10 +266,22 @@ def lambda_handler(event, context):
                     'created_at': datetime.utcnow().isoformat(),
                     'status': 'active',
                     'last_checked': datetime.utcnow().isoformat(),
-                    'environment': environment
+                    'environment': environment,
+                    'versioning': versioning,
+                    'lifecycle_policy': lifecycle_policy
                 }
             )
+            # Store custom lifecycle config if provided
+            if lifecycle_policy == 'Custom' and custom_lifecycle_config:
+                table.update_item(
+                    Key={'project_name': f"{user_id}#{project_name}"},
+                    UpdateExpression='SET custom_lifecycle_config = :config',
+                    ExpressionAttributeValues={
+                        ':config': custom_lifecycle_config
+                    }
+                )
             print(f"Successfully stored metadata for bucket {bucket_name} with user_id {user_id}")
+            print(f"  Versioning: {versioning}, Lifecycle Policy: {lifecycle_policy}")
         except Exception as db_error:
             # If DynamoDB write fails, this is critical - bucket exists but won't be tracked
             print(f"ERROR: Failed to write to DynamoDB: {str(db_error)}")

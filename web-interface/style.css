@@ -107,6 +107,34 @@ button:disabled {
     margin-top: 30px;
 }
 
+.bucket-list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+    gap: 15px;
+}
+
+.bucket-controls {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.sort-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sort-controls label {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
 .bucket-item {
     background: #f8f9fa;
     padding: 20px;
@@ -207,6 +235,73 @@ button:disabled {
     color: #333;
 }
 
+.bucket-config-section {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 15px;
+    margin-bottom: 20px;
+    border-left: 5px solid #667eea;
+}
+
+.bucket-config-section h3 {
+    color: #667eea;
+    margin-bottom: 15px;
+    font-size: 1.3em;
+}
+
+select {
+    width: 100%;
+    padding: 12px 16px;
+    border: 2px solid #e1e5e9;
+    border-radius: 10px;
+    font-size: 16px;
+    background-color: white;
+    cursor: pointer;
+    transition: border-color 0.3s ease;
+}
+
+select:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+textarea {
+    width: 100%;
+    padding: 12px 16px;
+    border: 2px solid #e1e5e9;
+    border-radius: 10px;
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+    resize: vertical;
+    transition: border-color 0.3s ease;
+}
+
+textarea:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+#customPolicySection {
+    background: #fff9e6;
+    padding: 15px;
+    border-radius: 10px;
+    border-left: 4px solid #ffc107;
+    margin-top: 10px;
+}
+
+#customPolicySection label {
+    color: #856404;
+    font-weight: 600;
+}
+
+small {
+    display: block;
+    margin-top: 5px;
+    color: #6c757d;
+    font-size: 13px;
+    font-style: italic;
+}
+
 @media (max-width: 768px) {
     .auth-forms {
         flex-direction: column;
@@ -218,5 +313,18 @@ button:disabled {
     
     .main-content {
         padding: 20px;
+    }
+    
+    .bucket-list-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    
+    .sort-controls {
+        width: 100%;
+    }
+    
+    .sort-controls select {
+        flex: 1;
     }
 }
