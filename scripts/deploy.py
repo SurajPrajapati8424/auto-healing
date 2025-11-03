@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
+"""
+Deploy CloudFormation stack for S3 Bucket Management System.
+
+This script handles CloudFormation stack deployment. 
+Lambda functions should be uploaded separately using upload-lambdas.py.
+
+Usage:
+    python scripts/deploy.py                           # Full deployment
+    python scripts/deploy.py --update-code             # Update Lambda code only
+    python scripts/deploy.py --environment prod        # Specify environment
+    python scripts/deploy.py --skip-upload              # Skip Lambda upload check
+"""
 import subprocess
 import sys
 import json
 import os
-import zipfile
-import tempfile
+import argparse
 
 # Configuration
 STACK_NAME = "s3-bucket-management-system"
@@ -30,98 +41,84 @@ def get_account_id():
         return None
     return identity.strip()
 
-def package_lambda_function(function_dir, output_path):
-    """Package Lambda function into a ZIP file"""
-    try:
-        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(function_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arc_name = os.path.relpath(file_path, function_dir)
-                    zipf.write(file_path, arc_name)
-        return True
-    except Exception as e:
-        print(f"❌ Error packaging {function_dir}: {e}")
-        return False
-
-def upload_to_s3(local_path, bucket_name, s3_key, region):
-    """Upload file to S3"""
-    try:
-        cmd = [
-            "aws", "s3", "cp", local_path,
-            f"s3://{bucket_name}/{s3_key}",
+def check_lambda_code_in_s3(environment, account_id, region):
+    """Check if Lambda code exists in S3"""
+    lambda_bucket_name = f"{environment}-lambda-deployment-packages-{account_id}"
+    lambda_functions = [
+        f"{environment}-create-bucket.zip",
+        f"{environment}-list-buckets.zip",
+        f"{environment}-delete-bucket.zip",
+        f"{environment}-monitor-buckets.zip",
+    ]
+    
+    missing = []
+    for zip_name in lambda_functions:
+        check_cmd = [
+            "aws", "s3api", "head-object",
+            "--bucket", lambda_bucket_name,
+            "--key", zip_name,
             "--region", region
         ]
-        result = run_command(cmd)
-        return result is not None
-    except Exception as e:
-        print(f"❌ Error uploading to S3: {e}")
-        return False
-
-def ensure_s3_bucket(bucket_name, region):
-    """Ensure S3 bucket exists, create if it doesn't"""
-    # Check if bucket exists (head-bucket returns 0 if exists, 255 if not)
-    check_cmd = ["aws", "s3api", "head-bucket", "--bucket", bucket_name]
-    try:
         result = subprocess.run(check_cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"✅ S3 bucket {bucket_name} already exists")
-            return True
-    except Exception:
-        pass  # Bucket doesn't exist, continue to create
+        if result.returncode != 0:
+            missing.append(zip_name)
     
-    # Create bucket
-    print(f"📦 Creating S3 bucket {bucket_name}...")
-    if region == "us-east-1":
-        create_cmd = ["aws", "s3api", "create-bucket", "--bucket", bucket_name, "--region", region]
-    else:
-        create_cmd = [
-            "aws", "s3api", "create-bucket",
-            "--bucket", bucket_name,
-            "--region", region,
-            "--create-bucket-configuration", f"LocationConstraint={region}"
+    return missing
+
+def update_lambda_code(environment, account_id, region):
+    """Update Lambda function code from S3"""
+    lambda_bucket_name = f"{environment}-lambda-deployment-packages-{account_id}"
+    lambda_functions = {
+        "create-bucket": f"{environment}-create-bucket",
+        "list-buckets": f"{environment}-list-buckets",
+        "delete-bucket": f"{environment}-delete-bucket",
+        "monitor-buckets": f"{environment}-monitor-buckets",
+    }
+    
+    print("🔄 Updating Lambda function code...")
+    for func_name, zip_name in lambda_functions.items():
+        function_name = zip_name
+        s3_key = f"{zip_name}.zip"
+        
+        print(f"📦 Updating {func_name}...")
+        update_cmd = [
+            "aws", "lambda", "update-function-code",
+            "--function-name", function_name,
+            "--s3-bucket", lambda_bucket_name,
+            "--s3-key", s3_key,
+            "--region", region
         ]
+        result = run_command(update_cmd)
+        if result:
+            print(f"✅ {func_name} updated successfully")
+        else:
+            print(f"❌ Failed to update {func_name}")
+            return False
     
-    result = run_command(create_cmd)
-    if result:
-        print(f"✅ S3 bucket {bucket_name} created")
-        
-        # Configure bucket to match CloudFormation template properties
-        # Enable versioning
-        version_cmd = ["aws", "s3api", "put-bucket-versioning",
-                      "--bucket", bucket_name,
-                      "--versioning-configuration", "Status=Enabled"]
-        run_command(version_cmd)
-        
-        # Configure lifecycle
-        lifecycle_config = {
-            "Rules": [{
-                "Id": "DeleteOldVersions",
-                "Status": "Enabled",
-                "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
-            }]
-        }
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(lifecycle_config, f)
-            lifecycle_file = f.name
-        
-        try:
-            lifecycle_cmd = ["aws", "s3api", "put-bucket-lifecycle-configuration",
-                           "--bucket", bucket_name,
-                           "--lifecycle-configuration", f"file://{lifecycle_file}"]
-            run_command(lifecycle_cmd)
-        finally:
-            os.unlink(lifecycle_file)
-        
-        return True
-    else:
-        print(f"❌ Failed to create S3 bucket {bucket_name}")
-        return False
+    return True
 
 def main():
+    parser = argparse.ArgumentParser(description='Deploy CloudFormation stack')
+    parser.add_argument('--environment', '-e', 
+                       default=ENVIRONMENT,
+                       choices=['dev', 'staging', 'prod'],
+                       help=f'Environment (default: {ENVIRONMENT})')
+    parser.add_argument('--region', '-r',
+                       default=REGION,
+                       help=f'AWS region (default: {REGION})')
+    parser.add_argument('--update-code', action='store_true',
+                       help='Update Lambda function code only (skip stack deployment)')
+    parser.add_argument('--skip-upload-check', action='store_true',
+                       help='Skip checking if Lambda code is uploaded to S3')
+    
+    args = parser.parse_args()
+    
+    environment = args.environment
+    region = args.region
+    
     print("=== S3 Bucket Management System Deployment ===")
-    print(f"Environment: {ENVIRONMENT}")
-    print(f"Region: {REGION}")
+    print(f"Environment: {environment}")
+    print(f"Region: {region}")
 
     # 1️⃣ Check AWS CLI
     print("Checking AWS CLI configuration...")
@@ -130,6 +127,19 @@ def main():
         print("❌ AWS CLI not configured. Please run 'aws configure'.")
         sys.exit(1)
     print("✅ AWS CLI configured correctly")
+
+    # Get account ID
+    account_id = get_account_id()
+    if not account_id:
+        print("❌ Failed to get AWS account ID")
+        sys.exit(1)
+
+    # If update-code only, just update Lambda functions
+    if args.update_code:
+        if not update_lambda_code(environment, account_id, region):
+            sys.exit(1)
+        print("\n✅ Lambda code update complete!")
+        return
 
     # 2️⃣ Load parameters
     params_file = os.path.join("infrastructure", "parameters.json")
@@ -153,73 +163,28 @@ def main():
         sys.exit(1)
     print("✅ Template validation successful!")
 
-    # 3.5️⃣ Package and upload Lambda functions
-    print("📦 Packaging Lambda functions...")
-    account_id = get_account_id()
-    if not account_id:
-        print("❌ Failed to get AWS account ID")
-        sys.exit(1)
-    
-    lambda_bucket_name = f"{ENVIRONMENT}-lambda-deployment-packages-{account_id}"
-    stack_name = f"{STACK_NAME}-{ENVIRONMENT}"
-    
-    # Check if stack exists
-    stack_exists_cmd = [
-        "aws", "cloudformation", "describe-stacks",
-        "--stack-name", stack_name,
-        "--region", REGION
-    ]
-    stack_exists = run_command(stack_exists_cmd) is not None
-    
-    # If stack doesn't exist, we need to create bucket first before deploying
-    # This is because CloudFormation needs the bucket to exist to upload Lambda code
-    if not stack_exists:
-        print("📦 Stack doesn't exist yet. Creating S3 bucket for Lambda code...")
-        print("   (This bucket will be managed by CloudFormation after deployment)")
-        if not ensure_s3_bucket(lambda_bucket_name, REGION):
-            sys.exit(1)
-    else:
-        # Check if bucket exists (it should, from the stack)
-        print(f"✅ Stack exists, verifying bucket: {lambda_bucket_name}")
-        bucket_check = ["aws", "s3api", "head-bucket", "--bucket", lambda_bucket_name]
-        bucket_result = subprocess.run(bucket_check, capture_output=True, text=True)
-        if bucket_result.returncode != 0:
-            print(f"⚠️  Warning: Bucket {lambda_bucket_name} not found. Creating it...")
-            if not ensure_s3_bucket(lambda_bucket_name, REGION):
-                sys.exit(1)
-    
-    # Package and upload each Lambda function
-    lambda_functions = [
-        ("create-bucket", f"{ENVIRONMENT}-create-bucket.zip"),
-        ("list-buckets", f"{ENVIRONMENT}-list-buckets.zip"),
-        ("delete-bucket", f"{ENVIRONMENT}-delete-bucket.zip"),
-        ("monitor-buckets", f"{ENVIRONMENT}-monitor-buckets.zip"),
-    ]
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for func_dir, zip_name in lambda_functions:
-            lambda_path = os.path.join("lambda-functions", func_dir)
-            if not os.path.exists(lambda_path):
-                print(f"❌ Lambda function directory not found: {lambda_path}")
-                sys.exit(1)
+    # 3.5️⃣ Check if Lambda code exists in S3 (unless skipped)
+    stack_name = f"{STACK_NAME}-{environment}"
+    if not args.skip_upload_check:
+        print("🔍 Checking if Lambda code is uploaded to S3...")
+        missing = check_lambda_code_in_s3(environment, account_id, region)
+        if missing:
+            print("⚠️  Warning: Some Lambda code files are missing in S3:")
+            for zip_name in missing:
+                print(f"   - {zip_name}")
+            print("\n💡 Run this command first to upload Lambda functions:")
+            print(f"   python scripts/upload-lambdas.py --environment {environment}")
             
-            zip_path = os.path.join(temp_dir, zip_name)
-            print(f"📦 Packaging {func_dir}...")
-            if not package_lambda_function(lambda_path, zip_path):
+            response = input("\nContinue anyway? (y/N): ").strip().lower()
+            if response != 'y':
+                print("❌ Deployment cancelled. Please upload Lambda functions first.")
                 sys.exit(1)
-            
-            print(f"☁️ Uploading {zip_name} to S3...")
-            if not upload_to_s3(zip_path, lambda_bucket_name, zip_name, REGION):
-                sys.exit(1)
-            print(f"✅ {zip_name} uploaded successfully")
-    
-    print("✅ All Lambda functions packaged and uploaded!")
 
     # 4️⃣ Check stack status and handle ROLLBACK_COMPLETE
     stack_status_cmd = [
         "aws", "cloudformation", "describe-stacks",
         "--stack-name", stack_name,
-        "--region", REGION,
+        "--region", region,
         "--query", "Stacks[0].StackStatus",
         "--output", "text"
     ]
@@ -227,10 +192,10 @@ def main():
     
     if stack_status and "ROLLBACK_COMPLETE" in stack_status:
         print("⚠️  Stack is in ROLLBACK_COMPLETE state. Deleting it before redeployment...")
-        delete_cmd = ["aws", "cloudformation", "delete-stack", "--stack-name", stack_name, "--region", REGION]
+        delete_cmd = ["aws", "cloudformation", "delete-stack", "--stack-name", stack_name, "--region", region]
         if run_command(delete_cmd):
             print("⏳ Waiting for stack deletion to complete...")
-            wait_cmd = ["aws", "cloudformation", "wait", "stack-delete-complete", "--stack-name", stack_name, "--region", REGION]
+            wait_cmd = ["aws", "cloudformation", "wait", "stack-delete-complete", "--stack-name", stack_name, "--region", region]
             run_command(wait_cmd)
             print("✅ Stack deleted successfully")
         else:
@@ -243,13 +208,13 @@ def main():
         "aws", "cloudformation", "deploy",
         "--template-file", template_file,
         "--stack-name", stack_name,
-        "--region", REGION,
+        "--region", region,
         "--capabilities", "CAPABILITY_NAMED_IAM",
         "--parameter-overrides",
         f"NotificationEmail={params['NotificationEmail']}",
-        f"Environment={ENVIRONMENT}",
+        f"Environment={environment}",
         "--tags",
-        f"Environment={ENVIRONMENT}",
+        f"Environment={environment}",
         "Project=BucketManagement"
     ]
     result = run_command(deploy_cmd)
@@ -262,8 +227,8 @@ def main():
     print("📊 Retrieving stack outputs...")
     outputs_raw = run_command([
         "aws", "cloudformation", "describe-stacks",
-        "--stack-name", f"{STACK_NAME}-{ENVIRONMENT}",
-        "--region", REGION,
+        "--stack-name", stack_name,
+        "--region", region,
         "--query", "Stacks[0].Outputs"
     ])
     if not outputs_raw:
@@ -283,11 +248,11 @@ def main():
     config_file = os.path.join("web-interface", "config.js")
     config_content = f"""const CONFIG = {{
     apiEndpoint: '{api_endpoint}',
-    region: '{REGION}',
+    region: '{region}',
     userPoolId: '{user_pool_id}',
     userPoolClientId: '{user_pool_client_id}',
     identityPoolId: '{identity_pool_id}',
-    environment: '{ENVIRONMENT}'
+    environment: '{environment}'
 }};"""
     os.makedirs(os.path.dirname(config_file), exist_ok=True)
     with open(config_file, 'w') as f:
@@ -304,6 +269,9 @@ def main():
     print("2. 👤 Create a test user: python scripts\\user_management.py create your-email@example.com Password123! \"Your Name\"")
     print("3. 🌐 Open web-interface\\index.html to test")
     print("4. 🧪 Run tests: python scripts\\test.py")
+    print("\n💡 To update Lambda code without redeploying:")
+    print(f"   python scripts/upload-lambdas.py --environment {environment}")
+    print(f"   python scripts/deploy.py --update-code --environment {environment}")
 
 if __name__ == "__main__":
     main()

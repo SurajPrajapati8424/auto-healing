@@ -18,33 +18,98 @@ def lambda_handler(event, context):
     healed_buckets = 0
     
     try:
-        # Scan all active buckets
-        response = table.scan(
-            FilterExpression='attribute_not_exists(deleted_at) OR #status = :active',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':active': 'active'}
-        )
+        print("=== Monitor Buckets Lambda Started ===")
+        print(f"Environment: {environment}, Region: {region}")
         
-        for item in response['Items']:
+        # Scan all buckets that need monitoring:
+        # 1. Active buckets (to check if they still exist)
+        # 2. Deleted buckets with should_heal=True (to restore them)
+        # Note: We scan all items and filter in code for better control
+        print("Scanning DynamoDB table...")
+        response = table.scan()
+        all_items = response.get('Items', [])
+        print(f"Initial scan returned {len(all_items)} items")
+        
+        # Get paginated results
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+            all_items.extend(response.get('Items', []))
+        
+        # Filter buckets that need monitoring
+        items_to_monitor = []
+        for item in all_items:
+            status = item.get('status', 'active')
+            deleted_at = item.get('deleted_at')
+            should_heal = item.get('should_heal', False)
+            
+            # Handle DynamoDB boolean types (could be bool or Decimal)
+            if isinstance(should_heal, (str, int, float)):
+                should_heal = bool(should_heal)
+            elif should_heal is None:
+                should_heal = False
+            
+            # Include if: active, or deleted with should_heal=True
+            if status == 'active' or (status == 'deleted' and deleted_at and should_heal):
+                items_to_monitor.append(item)
+        
+        print(f"Scanned DynamoDB: {len(all_items)} total buckets, {len(items_to_monitor)} buckets to monitor")
+        
+        if len(items_to_monitor) == 0:
+            print("⚠️  No buckets found to monitor. This might be normal if no buckets exist or all deleted buckets have should_heal=False")
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'message': 'Monitoring completed - no buckets to process',
+                    'processed_buckets': 0,
+                    'healed_buckets': 0
+                })
+            }
+        
+        for item in items_to_monitor:
             bucket_name = item['bucket_name']
             project_name = item['project_name']
             user_email = item.get('user_email', 'unknown')
             display_name = item.get('display_name', project_name)
             
             processed_buckets += 1
+            current_status = item.get('status', 'active')
+            should_heal_flag = item.get('should_heal', False)
+            deleted_at = item.get('deleted_at')
+            
+            # Handle DynamoDB boolean types
+            if isinstance(should_heal_flag, (str, int, float)):
+                should_heal_flag = bool(should_heal_flag)
+            elif should_heal_flag is None:
+                should_heal_flag = False
+            
+            print(f"Checking bucket {bucket_name} (status={current_status}, should_heal={should_heal_flag}, deleted_at={deleted_at})")
             
             try:
                 # Check if bucket exists
                 s3.head_bucket(Bucket=bucket_name)
                 
-                # Update last_checked
-                table.update_item(
-                    Key={'project_name': project_name},
-                    UpdateExpression='SET last_checked = :timestamp',
-                    ExpressionAttributeValues={
-                        ':timestamp': datetime.utcnow().isoformat()
-                    }
-                )
+                # Bucket exists
+                if current_status == 'deleted' and should_heal_flag:
+                    # Bucket exists but status is deleted - this shouldn't happen, but update status back to active
+                    print(f"WARNING: Bucket {bucket_name} exists but status is 'deleted'. Restoring status to active.")
+                    table.update_item(
+                        Key={'project_name': project_name},
+                        UpdateExpression='SET last_checked = :timestamp, #status = :active REMOVE deleted_at, deleted_by, deleted_by_email, should_heal',
+                        ExpressionAttributeNames={'#status': 'status'},
+                        ExpressionAttributeValues={
+                            ':timestamp': datetime.utcnow().isoformat(),
+                            ':active': 'active'
+                        }
+                    )
+                else:
+                    # Normal case: active bucket exists - update last_checked
+                    table.update_item(
+                        Key={'project_name': project_name},
+                        UpdateExpression='SET last_checked = :timestamp',
+                        ExpressionAttributeValues={
+                            ':timestamp': datetime.utcnow().isoformat()
+                        }
+                    )
                 
             except ClientError as e:
                 # Extract error code from boto3 ClientError
@@ -58,21 +123,23 @@ def lambda_handler(event, context):
                     'NoSuchBucket' in error_message):
                     
                     # Check if bucket should be healed based on deletion metadata
-                    should_heal = item.get('should_heal', True)  # Default to True for backwards compatibility
+                    should_heal_flag = item.get('should_heal', False)
                     deleted_at = item.get('deleted_at')
                     deleted_by = item.get('deleted_by')
+                    current_status = item.get('status', 'active')
                     
                     if deleted_at:
                         # Bucket was explicitly deleted - check if should heal
-                        if should_heal:
-                            print(f"Detected missing bucket {bucket_name} (deleted by non-owner/admin), initiating healing...")
+                        if should_heal_flag and current_status == 'deleted':
+                            print(f"Detected missing bucket {bucket_name} (status=deleted, should_heal=True), initiating healing...")
+                            print(f"  Deleted at: {deleted_at}, Deleted by: {deleted_by}")
                             if recreate_bucket(bucket_name, project_name, user_email, display_name):
                                 healed_buckets += 1
                                 print(f"Successfully healed bucket {bucket_name}")
                             else:
                                 print(f"Failed to heal bucket {bucket_name}")
                         else:
-                            print(f"Bucket {bucket_name} was deleted by owner/admin - skipping auto-heal")
+                            print(f"Bucket {bucket_name} was deleted but should_heal={should_heal_flag}, status={current_status} - skipping auto-heal")
                     else:
                         # No deletion metadata - treat as orphaned bucket (heal it)
                         print(f"Detected missing bucket {bucket_name} (orphaned), initiating healing...")
@@ -109,10 +176,13 @@ def lambda_handler(event, context):
         }
         
     except Exception as e:
-        print(f"Error in monitoring: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR in monitoring: {str(e)}")
+        print(f"Traceback: {error_details}")
         return {
             'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            'body': json.dumps({'error': str(e), 'traceback': error_details})
         }
 
 def recreate_bucket(bucket_name, project_name, user_email, display_name):
@@ -174,18 +244,20 @@ def recreate_bucket(bucket_name, project_name, user_email, display_name):
         except Exception as encrypt_error:
             print(f"WARNING: Failed to configure encryption: {str(encrypt_error)}")
         
-        # Update metadata
+        # Update metadata - restore bucket to active status
         try:
             table.update_item(
                 Key={'project_name': project_name},
-                UpdateExpression='SET last_checked = :timestamp, healed_at = :timestamp, heal_count = if_not_exists(heal_count, :zero) + :one',
+                UpdateExpression='SET last_checked = :timestamp, healed_at = :timestamp, heal_count = if_not_exists(heal_count, :zero) + :one, #status = :active REMOVE deleted_at, deleted_by, deleted_by_email, should_heal',
+                ExpressionAttributeNames={'#status': 'status'},
                 ExpressionAttributeValues={
                     ':timestamp': datetime.utcnow().isoformat(),
                     ':zero': 0,
-                    ':one': 1
+                    ':one': 1,
+                    ':active': 'active'
                 }
             )
-            print(f"DynamoDB updated for {bucket_name}")
+            print(f"DynamoDB updated for {bucket_name} - status restored to active")
         except Exception as db_error:
             print(f"ERROR: Failed to update DynamoDB: {str(db_error)}")
             # Don't fail healing if DynamoDB update fails, bucket was recreated
