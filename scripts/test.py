@@ -156,30 +156,76 @@ class TestSuite:
             return None
     
     def test_bucket_healing(self, bucket_name):
-        """Test bucket healing by deleting a bucket"""
+        """Test bucket healing by deleting a bucket via API (to preserve deletion metadata)"""
         print("\n🧪 Testing bucket healing...")
         
         try:
-            s3 = boto3.client('s3', region_name=self.config['region'])
+            # Extract project name from bucket name (format: env-project-uuid)
+            # The bucket name format is: {env}-{project_name}-{uuid}
+            # We need to find the project in DynamoDB first
+            import re
+            match = re.match(r'^[^-]+-(.+)-[a-f0-9]{8}$', bucket_name)
             
-            # Check if bucket exists before trying to delete
-            try:
-                s3.head_bucket(Bucket=bucket_name)
-            except s3.exceptions.NoSuchBucket:
-                print(f"⚠️  Bucket {bucket_name} doesn't exist, skipping healing test")
-                return False
-            
-            # Delete the bucket to trigger healing
-            try:
-                s3.delete_bucket(Bucket=bucket_name)
-                print(f"🗑️  Deleted bucket {bucket_name} to test healing")
-            except Exception as delete_error:
-                print(f"⚠️  Could not delete bucket (may need to be empty first): {delete_error}")
-                print("⏭️  Skipping healing test")
-                return False
+            if not match:
+                print(f"⚠️  Could not extract project name from bucket name: {bucket_name}")
+                print("   Using API delete requires project name. Falling back to direct S3 delete...")
+                # Fall back to direct S3 deletion (no metadata will be recorded)
+                s3 = boto3.client('s3', region_name=self.config['region'])
+                try:
+                    s3.head_bucket(Bucket=bucket_name)
+                except s3.exceptions.NoSuchBucket:
+                    print(f"⚠️  Bucket {bucket_name} doesn't exist, skipping healing test")
+                    return False
+                
+                try:
+                    s3.delete_bucket(Bucket=bucket_name)
+                    print(f"🗑️  Deleted bucket {bucket_name} directly (no deletion metadata recorded)")
+                    print("   ⚠️  Note: Direct S3 deletion won't create audit trail in DynamoDB")
+                except Exception as delete_error:
+                    print(f"⚠️  Could not delete bucket: {delete_error}")
+                    return False
+            else:
+                # Try to delete via API to preserve deletion metadata
+                project_name = match.group(1)
+                print(f"🗑️  Deleting bucket via API (project: {project_name}) to preserve audit trail...")
+                
+                response = requests.delete(
+                    f"{self.config['api_endpoint']}/buckets?project_name={project_name}",
+                    headers={'Authorization': f'Bearer {self.id_token}'}
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"✅ Bucket deleted via API: {data.get('message', 'Success')}")
+                    print(f"   Deleted by: {data.get('deleted_by', 'unknown')}")
+                    print(f"   Auto-heal: {data.get('should_heal', False)}")
+                elif response.status_code == 404:
+                    print(f"⚠️  Project not found via API, using direct S3 delete...")
+                    # Fall back to direct deletion
+                    s3 = boto3.client('s3', region_name=self.config['region'])
+                    try:
+                        s3.delete_bucket(Bucket=bucket_name)
+                        print(f"🗑️  Deleted bucket {bucket_name} directly (no deletion metadata)")
+                    except Exception as delete_error:
+                        print(f"⚠️  Could not delete bucket: {delete_error}")
+                        return False
+                else:
+                    print(f"⚠️  API delete failed ({response.status_code}): {response.text}")
+                    print("   Falling back to direct S3 delete...")
+                    s3 = boto3.client('s3', region_name=self.config['region'])
+                    try:
+                        s3.delete_bucket(Bucket=bucket_name)
+                        print(f"🗑️  Deleted bucket {bucket_name} directly")
+                    except Exception as delete_error:
+                        print(f"⚠️  Could not delete bucket: {delete_error}")
+                        return False
             
             # Wait for healing (monitoring runs every 5 minutes)
-            print("⏳ Waiting for healing process (this may take up to 10 minutes)...")
+            print("\n⏳ Waiting for healing process (monitoring runs every 5 minutes)...")
+            print("   Note: Check deletion metadata with: python scripts/audit_deletions.py")
+            
+            # Ensure s3 client is available for checking
+            s3 = boto3.client('s3', region_name=self.config['region'])
             
             for i in range(10):  # Wait up to 10 minutes
                 time.sleep(60)  # Wait 1 minute

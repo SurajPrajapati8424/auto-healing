@@ -91,10 +91,11 @@ def lambda_handler(event, context):
                 # Bucket exists
                 if current_status == 'deleted' and should_heal_flag:
                     # Bucket exists but status is deleted - this shouldn't happen, but update status back to active
+                    # Preserve deletion history for auditing
                     print(f"WARNING: Bucket {bucket_name} exists but status is 'deleted'. Restoring status to active.")
                     table.update_item(
                         Key={'project_name': project_name},
-                        UpdateExpression='SET last_checked = :timestamp, #status = :active REMOVE deleted_at, deleted_by, deleted_by_email, should_heal',
+                        UpdateExpression='SET last_checked = :timestamp, #status = :active REMOVE should_heal',
                         ExpressionAttributeNames={'#status': 'status'},
                         ExpressionAttributeValues={
                             ':timestamp': datetime.utcnow().isoformat(),
@@ -133,7 +134,16 @@ def lambda_handler(event, context):
                         if should_heal_flag and current_status == 'deleted':
                             print(f"Detected missing bucket {bucket_name} (status=deleted, should_heal=True), initiating healing...")
                             print(f"  Deleted at: {deleted_at}, Deleted by: {deleted_by}")
-                            if recreate_bucket(bucket_name, project_name, user_email, display_name):
+                            deleted_by_email = item.get('deleted_by_email', 'unknown')
+                            print(f"  Deleted by email: {deleted_by_email}")
+                            
+                            # Pass deletion info to recreate_bucket function
+                            deletion_info = {
+                                'deleted_at': deleted_at,
+                                'deleted_by': deleted_by,
+                                'deleted_by_email': deleted_by_email
+                            }
+                            if recreate_bucket(bucket_name, project_name, user_email, display_name, deletion_info):
                                 healed_buckets += 1
                                 print(f"Successfully healed bucket {bucket_name}")
                             else:
@@ -157,8 +167,8 @@ def lambda_handler(event, context):
                     'Not Found' in error_message or 
                     'NoSuchBucket' in error_message or
                     hasattr(e, '__class__') and 'NoSuchBucket' in str(e.__class__)):
-                    print(f"Detected missing bucket {bucket_name}, initiating healing...")
-                    if recreate_bucket(bucket_name, project_name, user_email, display_name):
+                    print(f"Detected missing bucket {bucket_name} (exception-based detection), initiating healing...")
+                    if recreate_bucket(bucket_name, project_name, user_email, display_name, None):
                         healed_buckets += 1
                         print(f"Successfully healed bucket {bucket_name}")
                     else:
@@ -185,9 +195,17 @@ def lambda_handler(event, context):
             'body': json.dumps({'error': str(e), 'traceback': error_details})
         }
 
-def recreate_bucket(bucket_name, project_name, user_email, display_name):
+def recreate_bucket(bucket_name, project_name, user_email, display_name, deletion_info=None):
+    """
+    Recreate a deleted bucket
+    
+    Args:
+        deletion_info: Dict with deletion metadata (deleted_at, deleted_by, deleted_by_email)
+    """
     try:
         print(f"Attempting to recreate bucket {bucket_name}...")
+        if deletion_info:
+            print(f"  Preserving deletion history: {deletion_info}")
         
         # Recreate bucket (region-aware)
         try:
@@ -244,29 +262,47 @@ def recreate_bucket(bucket_name, project_name, user_email, display_name):
         except Exception as encrypt_error:
             print(f"WARNING: Failed to configure encryption: {str(encrypt_error)}")
         
-        # Update metadata - restore bucket to active status
+        # Update metadata - restore bucket to active status but preserve deletion history for auditing
         try:
+            # We keep deletion metadata (deleted_at, deleted_by, deleted_by_email) for audit trail
+            # Only remove should_heal since it's no longer needed
+            # Note: deletion_info will be preserved in the item (not removed)
+            update_expr = 'SET last_checked = :timestamp, healed_at = :timestamp, heal_count = if_not_exists(heal_count, :zero) + :one, #status = :active REMOVE should_heal'
+            expr_values = {
+                ':timestamp': datetime.utcnow().isoformat(),
+                ':zero': 0,
+                ':one': 1,
+                ':active': 'active'
+            }
+            
             table.update_item(
                 Key={'project_name': project_name},
-                UpdateExpression='SET last_checked = :timestamp, healed_at = :timestamp, heal_count = if_not_exists(heal_count, :zero) + :one, #status = :active REMOVE deleted_at, deleted_by, deleted_by_email, should_heal',
+                UpdateExpression=update_expr,
                 ExpressionAttributeNames={'#status': 'status'},
-                ExpressionAttributeValues={
-                    ':timestamp': datetime.utcnow().isoformat(),
-                    ':zero': 0,
-                    ':one': 1,
-                    ':active': 'active'
-                }
+                ExpressionAttributeValues=expr_values
             )
-            print(f"DynamoDB updated for {bucket_name} - status restored to active")
+            
+            # Log deletion history for audit
+            if deletion_info:
+                print(f"DynamoDB updated for {bucket_name} - status restored to active")
+                print(f"  Deletion history preserved: deleted_at={deletion_info.get('deleted_at')}, deleted_by={deletion_info.get('deleted_by_email')}")
+            else:
+                print(f"DynamoDB updated for {bucket_name} - status restored to active")
         except Exception as db_error:
             print(f"ERROR: Failed to update DynamoDB: {str(db_error)}")
             # Don't fail healing if DynamoDB update fails, bucket was recreated
         
-        # Send healing notification (non-blocking)
+        # Send healing notification with deletion history (non-blocking)
         try:
+            # Include deletion history in notification if available
+            deletion_info_text = ""
+            if deletion_info:
+                deleted_by_display = deletion_info.get('deleted_by_email') or deletion_info.get('deleted_by', 'unknown')
+                deletion_info_text = f"\n\nDeletion History:\n  - Deleted at: {deletion_info.get('deleted_at', 'unknown')}\n  - Deleted by: {deleted_by_display}\n  - Original owner: {user_email}"
+            
             sns.publish(
                 TopicArn=topic_arn,
-                Message=f"Bucket {bucket_name} for project '{display_name}' was automatically recreated.\n\nUser: {user_email}\nTime: {datetime.utcnow().isoformat()}\n\nThe bucket was deleted and has been restored with the same configuration.",
+                Message=f"Bucket {bucket_name} for project '{display_name}' was automatically recreated.\n\nOriginal User: {user_email}\nHealed at: {datetime.utcnow().isoformat()}{deletion_info_text}\n\nThe bucket was deleted and has been restored with the same configuration.",
                 Subject=f"S3 Bucket Healed - {display_name}"
             )
             print(f"Notification sent for {bucket_name}")
