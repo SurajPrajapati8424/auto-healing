@@ -327,15 +327,29 @@ def lambda_handler(event, context):
                     'lifecycle_policy': lifecycle_policy
                 }
             )
-            # Store custom lifecycle config if provided
+            # Store custom lifecycle config if provided (must succeed)
             if lifecycle_policy == 'Custom' and custom_lifecycle_config:
-                table.update_item(
-                    Key={'project_name': f"{user_id}#{project_name}"},
-                    UpdateExpression='SET custom_lifecycle_config = :config',
-                    ExpressionAttributeValues={
-                        ':config': custom_lifecycle_config
-                    }
-                )
+                try:
+                    table.update_item(
+                        Key={'project_name': f"{user_id}#{project_name}"},
+                        UpdateExpression='SET custom_lifecycle_config = :config',
+                        ExpressionAttributeValues={
+                            ':config': custom_lifecycle_config
+                        }
+                    )
+                    print(f"Custom lifecycle config stored in DynamoDB")
+                except Exception as custom_config_error:
+                    # Custom config update failed - this is critical for custom policies
+                    print(f"ERROR: Failed to store custom lifecycle config: {str(custom_config_error)}")
+                    # Rollback: delete the bucket item we just created
+                    try:
+                        table.delete_item(Key={'project_name': f"{user_id}#{project_name}"})
+                        print(f"Rolled back bucket metadata due to custom config storage failure")
+                    except Exception as rollback_error:
+                        print(f"WARNING: Could not rollback bucket metadata: {str(rollback_error)}")
+                    # Re-raise as db_error to trigger cleanup logic
+                    raise Exception(f"Failed to store custom lifecycle config: {str(custom_config_error)}")
+                    
             print(f"Successfully stored metadata for bucket {bucket_name} with user_id {user_id}")
             print(f"  Versioning: {versioning}, Lifecycle Policy: {lifecycle_policy}")
         except Exception as db_error:
@@ -347,14 +361,21 @@ def lambda_handler(event, context):
             try:
                 # First, try to remove any bucket configurations that might prevent deletion
                 try:
+                    s3.delete_bucket_lifecycle_configuration(Bucket=bucket_name)
+                except:
+                    pass  # Lifecycle policies don't block deletion, but clean up if possible
+                
+                try:
                     s3.delete_bucket_encryption(Bucket=bucket_name)
                 except:
                     pass
+                
                 try:
                     s3.delete_public_access_block(Bucket=bucket_name)
                 except:
                     pass
                 
+                # Note: Versioning and objects can still prevent deletion, but we try
                 s3.delete_bucket(Bucket=bucket_name)
                 print(f"Cleaned up bucket {bucket_name} due to DynamoDB failure")
             except Exception as cleanup_error:

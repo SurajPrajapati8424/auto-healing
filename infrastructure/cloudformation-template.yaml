@@ -152,6 +152,7 @@ Resources:
                   - s3:PutBucketEncryption
                   - s3:PutEncryptionConfiguration
                   - s3:PutLifecycleConfiguration
+                  - s3:DeleteLifecycleConfiguration
                   - s3:GetBucketVersioning
                   - s3:GetLifecycleConfiguration
                   - s3:HeadBucket

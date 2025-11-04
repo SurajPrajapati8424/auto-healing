@@ -69,7 +69,7 @@ function validateCustomPolicy() {
     const jsonText = document.getElementById('customPolicyJson').value.trim();
     
     if (!jsonText) {
-        showStatus('Please enter a lifecycle policy JSON', 'error');
+        showNotification('Please enter a lifecycle policy JSON', 'error');
         return false;
     }
     
@@ -78,44 +78,360 @@ function validateCustomPolicy() {
         
         // Basic validation - check for required structure
         if (!policy.Rules || !Array.isArray(policy.Rules) || policy.Rules.length === 0) {
-            showStatus('Invalid policy: Must contain a "Rules" array with at least one rule', 'error');
+            showNotification('Invalid policy: Must contain a "Rules" array with at least one rule', 'error');
             return false;
         }
+        
+        // Valid AWS S3 Storage Classes
+        const validStorageClasses = [
+            'STANDARD',
+            'STANDARD_IA',
+            'ONEZONE_IA',
+            'INTELLIGENT_TIERING',
+            'GLACIER',
+            'DEEP_ARCHIVE',
+            'GLACIER_IR',
+            'REDUCED_REDUNDANCY'  // Legacy, but still valid
+        ];
         
         // Validate each rule has required fields
         for (let i = 0; i < policy.Rules.length; i++) {
             const rule = policy.Rules[i];
+            
+            if (!rule || typeof rule !== 'object') {
+                showNotification(`Invalid rule at index ${i}: Rule must be an object`, 'error');
+                return false;
+            }
+            
             // Accept both 'Id' and 'ID' but note that AWS requires 'ID' (uppercase)
             const ruleId = rule.ID || rule.Id;
-            if (!ruleId || !rule.Status) {
-                showStatus(`Invalid rule at index ${i}: Must have "ID" (or "Id") and "Status" fields`, 'error');
+            if (!ruleId) {
+                showNotification(`Invalid rule at index ${i}: Must have "ID" (or "Id") field`, 'error');
+                return false;
+            }
+            // Validate ID is a string (not a number)
+            if (typeof ruleId !== 'string') {
+                showNotification(`Invalid rule at index ${i}: ID must be a string (not a number). Got: ${typeof ruleId}`, 'error');
+                return false;
+            }
+            
+            if (!rule.Status) {
+                showNotification(`Invalid rule at index ${i}: Must have "Status" field`, 'error');
+                return false;
+            }
+            
+            // Status must be exactly "Enabled" or "Disabled" (case-sensitive)
+            if (typeof rule.Status !== 'string') {
+                showNotification(`Invalid rule at index ${i}: Status must be a string`, 'error');
                 return false;
             }
             if (rule.Status !== 'Enabled' && rule.Status !== 'Disabled') {
-                showStatus(`Invalid rule at index ${i}: Status must be "Enabled" or "Disabled"`, 'error');
+                showNotification(`Invalid rule at index ${i}: Status must be exactly "Enabled" or "Disabled" (case-sensitive). Got: "${rule.Status}"`, 'error');
                 return false;
             }
-            // Normalize to uppercase ID if lowercase Id was provided
+            
+            // CRITICAL: Validate field names that AWS doesn't accept (these cause AWS API errors)
+            const invalidFields = ['ExpirationDays', 'ExpireAfterDays', 'AfterDays', 'TransitionDays'];
+            const foundInvalid = invalidFields.filter(field => rule.hasOwnProperty(field));
+            if (foundInvalid.length > 0) {
+                showNotification(`Invalid rule at index ${i}: Invalid field(s) ${foundInvalid.join(', ')}. Use "Expiration": {"Days": ...} instead of "ExpirationDays"`, 'error');
+                return false;
+            }
+            
+            // Validate Expiration structure if present
+            if (rule.Expiration) {
+                if (typeof rule.Expiration !== 'object' || Array.isArray(rule.Expiration)) {
+                    showNotification(`Invalid rule at index ${i}: Expiration must be an object`, 'error');
+                    return false;
+                }
+                
+                // Check for common typos in field names
+                const expirationKeys = Object.keys(rule.Expiration);
+                const invalidExpirationKeys = expirationKeys.filter(key => 
+                    key !== 'Days' && key !== 'Date' && key !== 'ExpiredObjectDeleteMarker'
+                );
+                if (invalidExpirationKeys.length > 0) {
+                    showNotification(`Invalid rule at index ${i}: Expiration has invalid field(s): ${invalidExpirationKeys.join(', ')}. Use "Days" or "Date" (not "Dayz" or similar)`, 'error');
+                    return false;
+                }
+                
+                // Must have either Days or Date
+                if (!rule.Expiration.Days && !rule.Expiration.Date) {
+                    showNotification(`Invalid rule at index ${i}: Expiration must have "Days" or "Date" field`, 'error');
+                    return false;
+                }
+                // Validate Days is a number if present
+                if (rule.Expiration.Days !== undefined) {
+                    if (typeof rule.Expiration.Days === 'string') {
+                        showNotification(`Invalid rule at index ${i}: Expiration.Days must be a number (not a string like "Thirty")`, 'error');
+                        return false;
+                    }
+                    if (typeof rule.Expiration.Days !== 'number' || rule.Expiration.Days < 0 || !Number.isInteger(rule.Expiration.Days)) {
+                        showNotification(`Invalid rule at index ${i}: Expiration.Days must be a positive integer (got: ${rule.Expiration.Days})`, 'error');
+                        return false;
+                    }
+                }
+                // Validate Date is a string if present
+                if (rule.Expiration.Date !== undefined) {
+                    if (typeof rule.Expiration.Date !== 'string') {
+                        showNotification(`Invalid rule at index ${i}: Expiration.Date must be a string (ISO 8601 format)`, 'error');
+                        return false;
+                    }
+                }
+            }
+            
+            // Validate Transitions structure if present
+            if (rule.Transitions) {
+                if (!Array.isArray(rule.Transitions)) {
+                    showNotification(`Invalid rule at index ${i}: Transitions must be an array`, 'error');
+                    return false;
+                }
+                if (rule.Transitions.length === 0) {
+                    showNotification(`Invalid rule at index ${i}: Transitions array cannot be empty`, 'error');
+                    return false;
+                }
+                for (let j = 0; j < rule.Transitions.length; j++) {
+                    const trans = rule.Transitions[j];
+                    if (!trans || typeof trans !== 'object' || Array.isArray(trans)) {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Must be an object`, 'error');
+                        return false;
+                    }
+                    // CRITICAL: Check for invalid field names that cause AWS API errors
+                    const invalidTransFields = ['AfterDays', 'TransitionDays'];
+                    const foundInvalidTrans = invalidTransFields.filter(field => trans.hasOwnProperty(field));
+                    if (foundInvalidTrans.length > 0) {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Invalid field(s) ${foundInvalidTrans.join(', ')}. Use "Days" (not "AfterDays")`, 'error');
+                        return false;
+                    }
+                    // Validate required fields
+                    if (!trans.Days && !trans.Date) {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Must have "Days" or "Date" field`, 'error');
+                        return false;
+                    }
+                    // Validate Days is a number if present
+                    if (trans.Days !== undefined) {
+                        if (typeof trans.Days === 'string') {
+                            showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Days must be a number (not a string like "30" or "thirty")`, 'error');
+                            return false;
+                        }
+                        if (typeof trans.Days !== 'number' || trans.Days < 0 || !Number.isInteger(trans.Days)) {
+                            showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Days must be a positive integer (got: ${trans.Days})`, 'error');
+                            return false;
+                        }
+                    }
+                    // Validate Date is a string if present
+                    if (trans.Date !== undefined) {
+                        if (typeof trans.Date !== 'string') {
+                            showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Date must be a string (ISO 8601 format)`, 'error');
+                            return false;
+                        }
+                    }
+                    // Validate StorageClass is required and valid
+                    if (!trans.StorageClass) {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Must have "StorageClass" field`, 'error');
+                        return false;
+                    }
+                    if (typeof trans.StorageClass !== 'string') {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: StorageClass must be a string`, 'error');
+                        return false;
+                    }
+                    if (!validStorageClasses.includes(trans.StorageClass)) {
+                        showNotification(`Invalid rule at index ${i}, Transition at index ${j}: Invalid StorageClass "${trans.StorageClass}". Valid values: ${validStorageClasses.join(', ')}`, 'error');
+                        return false;
+                    }
+                }
+            }
+            
+            // Validate NoncurrentVersionTransitions if present
+            if (rule.NoncurrentVersionTransitions) {
+                if (!Array.isArray(rule.NoncurrentVersionTransitions)) {
+                    showNotification(`Invalid rule at index ${i}: NoncurrentVersionTransitions must be an array`, 'error');
+                    return false;
+                }
+                for (let j = 0; j < rule.NoncurrentVersionTransitions.length; j++) {
+                    const trans = rule.NoncurrentVersionTransitions[j];
+                    if (!trans || typeof trans !== 'object' || Array.isArray(trans)) {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: Must be an object`, 'error');
+                        return false;
+                    }
+                    if (trans.NoncurrentDays === undefined) {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: Must have "NoncurrentDays" field`, 'error');
+                        return false;
+                    }
+                    if (typeof trans.NoncurrentDays === 'string') {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: NoncurrentDays must be a number (not a string)`, 'error');
+                        return false;
+                    }
+                    if (typeof trans.NoncurrentDays !== 'number' || trans.NoncurrentDays < 0 || !Number.isInteger(trans.NoncurrentDays)) {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: NoncurrentDays must be a positive integer`, 'error');
+                        return false;
+                    }
+                    if (!trans.StorageClass) {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: Must have "StorageClass" field`, 'error');
+                        return false;
+                    }
+                    if (!validStorageClasses.includes(trans.StorageClass)) {
+                        showNotification(`Invalid rule at index ${i}, NoncurrentVersionTransition at index ${j}: Invalid StorageClass "${trans.StorageClass}"`, 'error');
+                        return false;
+                    }
+                }
+            }
+            
+            // Validate NoncurrentVersionExpiration if present
+            if (rule.NoncurrentVersionExpiration) {
+                if (typeof rule.NoncurrentVersionExpiration !== 'object' || Array.isArray(rule.NoncurrentVersionExpiration)) {
+                    showNotification(`Invalid rule at index ${i}: NoncurrentVersionExpiration must be an object`, 'error');
+                    return false;
+                }
+                if (rule.NoncurrentVersionExpiration.NoncurrentDays !== undefined) {
+                    if (typeof rule.NoncurrentVersionExpiration.NoncurrentDays === 'string') {
+                        showNotification(`Invalid rule at index ${i}: NoncurrentVersionExpiration.NoncurrentDays must be a number (not a string like "Ninety")`, 'error');
+                        return false;
+                    }
+                    if (typeof rule.NoncurrentVersionExpiration.NoncurrentDays !== 'number' || rule.NoncurrentVersionExpiration.NoncurrentDays < 0 || !Number.isInteger(rule.NoncurrentVersionExpiration.NoncurrentDays)) {
+                        showNotification(`Invalid rule at index ${i}: NoncurrentVersionExpiration.NoncurrentDays must be a positive integer`, 'error');
+                        return false;
+                    }
+                }
+            }
+            
+            // Validate Filter structure if present
+            if (rule.Filter) {
+                if (typeof rule.Filter !== 'object' || Array.isArray(rule.Filter)) {
+                    showNotification(`Invalid rule at index ${i}: Filter must be an object`, 'error');
+                    return false;
+                }
+                
+                // Validate Prefix if present
+                if (rule.Filter.Prefix !== undefined && typeof rule.Filter.Prefix !== 'string') {
+                    showNotification(`Invalid rule at index ${i}: Filter.Prefix must be a string`, 'error');
+                    return false;
+                }
+                
+                // Validate Tags if present
+                if (rule.Filter.Tags !== undefined) {
+                    if (!Array.isArray(rule.Filter.Tags)) {
+                        showNotification(`Invalid rule at index ${i}: Filter.Tags must be an array of objects with "Key" and "Value" fields`, 'error');
+                        return false;
+                    }
+                    for (let k = 0; k < rule.Filter.Tags.length; k++) {
+                        const tag = rule.Filter.Tags[k];
+                        if (!tag || typeof tag !== 'object' || Array.isArray(tag)) {
+                            showNotification(`Invalid rule at index ${i}, Filter.Tags at index ${k}: Must be an object with "Key" and "Value" fields`, 'error');
+                            return false;
+                        }
+                        if (!tag.Key || typeof tag.Key !== 'string') {
+                            showNotification(`Invalid rule at index ${i}, Filter.Tags at index ${k}: Must have "Key" field (string)`, 'error');
+                            return false;
+                        }
+                        if (!tag.Value || typeof tag.Value !== 'string') {
+                            showNotification(`Invalid rule at index ${i}, Filter.Tags at index ${k}: Must have "Value" field (string)`, 'error');
+                            return false;
+                        }
+                    }
+                }
+                
+                // Validate And if present
+                if (rule.Filter.And) {
+                    if (typeof rule.Filter.And !== 'object' || Array.isArray(rule.Filter.And)) {
+                        showNotification(`Invalid rule at index ${i}: Filter.And must be an object`, 'error');
+                        return false;
+                    }
+                }
+            }
+            
+            // Normalize to uppercase ID if lowercase Id was provided (for display)
             if (rule.Id && !rule.ID) {
                 rule.ID = rule.Id;
                 delete rule.Id;
             }
         }
         
-        showStatus('✅ Valid JSON policy!', 'success');
+        showNotification('Valid JSON policy! Ready to create bucket.', 'success');
         return true;
     } catch (e) {
-        showStatus(`Invalid JSON: ${e.message}`, 'error');
+        showNotification(`Invalid JSON: ${e.message}`, 'error');
         return false;
     }
 }
 
 function showStatus(message, type = 'info') {
-    const statusDiv = document.getElementById('status');
-    statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+    // Legacy function - redirect to new notification system
+    showNotification(message, type);
+}
+
+function showNotification(message, type = 'info', duration = 5000) {
+    // Create notification container if it doesn't exist
+    let notificationContainer = document.getElementById('notificationContainer');
+    if (!notificationContainer) {
+        notificationContainer = document.createElement('div');
+        notificationContainer.id = 'notificationContainer';
+        notificationContainer.className = 'notification-container';
+        document.body.appendChild(notificationContainer);
+    }
+    
+    // Remove duplicate emoji from message if it matches the icon
+    const icon = getNotificationIcon(type);
+    let cleanMessage = message;
+    // Remove emoji from start of message if it matches the icon emoji
+    const emojiMap = {
+        '✅': 'success',
+        '❌': 'error',
+        '⚠️': 'warning',
+        'ℹ️': 'info'
+    };
+    // Check if message starts with the same emoji as the icon
+    if (message.startsWith(icon)) {
+        // Remove the emoji and any following whitespace
+        cleanMessage = message.substring(icon.length).trim();
+    } else {
+        // Also check for known emoji patterns at the start
+        for (const [emoji, emojiType] of Object.entries(emojiMap)) {
+            if (emojiType === type && message.startsWith(emoji)) {
+                cleanMessage = message.substring(emoji.length).trim();
+                break;
+            }
+        }
+    }
+    
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.innerHTML = `
+        <div class="notification-content">
+            <span class="notification-icon">${icon}</span>
+            <span class="notification-message">${cleanMessage}</span>
+            <button class="notification-close" onclick="this.parentElement.parentElement.remove()">×</button>
+        </div>
+    `;
+    
+    // Add to container
+    notificationContainer.appendChild(notification);
+    
+    // Animate in
     setTimeout(() => {
-        statusDiv.innerHTML = '';
-    }, 5000);
+        notification.classList.add('notification-show');
+    }, 10);
+    
+    // Auto-remove after duration
+    setTimeout(() => {
+        notification.classList.remove('notification-show');
+        setTimeout(() => {
+            if (notification.parentElement) {
+                notification.remove();
+            }
+        }, 300); // Match CSS transition duration
+    }, duration);
+}
+
+function getNotificationIcon(type) {
+    const icons = {
+        'success': '✅',
+        'error': '❌',
+        'warning': '⚠️',
+        'info': 'ℹ️'
+    };
+    return icons[type] || 'ℹ️';
 }
 
 function setLoading(elementId, loading) {
@@ -162,6 +478,11 @@ async function signUp() {
         
         // Store email for confirmation
         localStorage.setItem('pendingEmail', email);
+        
+        // Clear form fields
+        document.getElementById('signUpName').value = '';
+        document.getElementById('signUpEmail').value = '';
+        document.getElementById('signUpPassword').value = '';
         
         // Show confirmation form
         document.getElementById('confirmationForm').style.display = 'block';
@@ -383,14 +704,37 @@ async function createBucket() {
             lifecycle_policy: lifecyclePolicy
         };
         
-        // If custom policy, validate and include the JSON
+        // If custom policy, validate and include the JSON (CRITICAL - must validate before sending)
         if (lifecyclePolicy === 'Custom') {
             const customJson = document.getElementById('customPolicyJson').value.trim();
+            
+            if (!customJson) {
+                showNotification('Custom lifecycle policy requires a JSON configuration', 'error');
+                setLoading('createBtn', false);
+                return;
+            }
+            
+            // Validate JSON syntax and structure
             if (!validateCustomPolicy()) {
                 setLoading('createBtn', false);
                 return; // Don't create if validation fails
             }
-            requestBody.custom_lifecycle_config = JSON.parse(customJson);
+            
+            // Parse and validate one more time before sending
+            try {
+                const parsedConfig = JSON.parse(customJson);
+                // Ensure it's properly formatted
+                if (!parsedConfig.Rules || !Array.isArray(parsedConfig.Rules) || parsedConfig.Rules.length === 0) {
+                    showNotification('Invalid custom policy: Rules array is required', 'error');
+                    setLoading('createBtn', false);
+                    return;
+                }
+                requestBody.custom_lifecycle_config = parsedConfig;
+            } catch (parseError) {
+                showNotification(`JSON parsing error: ${parseError.message}`, 'error');
+                setLoading('createBtn', false);
+                return;
+            }
         }
         
         const response = await fetch(`${CONFIG.apiEndpoint}/buckets`, {
@@ -410,25 +754,29 @@ async function createBucket() {
             } catch (e) {
                 errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             }
-            showStatus(`❌ ${errorMessage}`, 'error');
+            showStatus(`${errorMessage}`, 'error');
             return;
         }
 
         const data = await response.json();
 
         if (data.bucket_name) {
-            showStatus(`✅ Bucket created successfully: ${data.bucket_name}`, 'success');
+            showStatus(`Bucket created successfully: ${data.bucket_name}`, 'success');
             document.getElementById('projectName').value = '';
+            // Clear custom policy textarea if Custom was selected
+            if (lifecyclePolicy === 'Custom') {
+                document.getElementById('customPolicyJson').value = '';
+            }
             loadBuckets();
         } else {
-            showStatus(`❌ Unexpected response format`, 'error');
+            showStatus(`Unexpected response format`, 'error');
         }
     } catch (error) {
         console.error('Create bucket error:', error);
         if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
-            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
+            showStatus('Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
         } else {
-            showStatus(`❌ Error: ${error.message}`, 'error');
+            showStatus(`Error: ${error.message}`, 'error');
         }
     } finally {
         setLoading('createBtn', false);
@@ -464,7 +812,7 @@ async function loadBuckets() {
                 errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             }
             bucketsList.innerHTML = `<p style="color: red;">❌ ${errorMessage}</p>`;
-            showStatus(`❌ ${errorMessage}`, 'error');
+            showStatus(`${errorMessage}`, 'error');
             return;
         }
 
@@ -493,10 +841,10 @@ async function loadBuckets() {
         bucketsData = [];
         if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
             bucketsList.innerHTML = '<p style="color: red;">❌ Network error: Cannot reach API. Please check your connection and API endpoint.</p>';
-            showStatus('❌ Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
+            showStatus('Network error: Cannot reach API. Please check your connection and API endpoint.', 'error');
         } else {
             bucketsList.innerHTML = `<p style="color: red;">❌ Error: ${error.message}</p>`;
-            showStatus(`❌ Error: ${error.message}`, 'error');
+            showStatus(`Error: ${error.message}`, 'error');
         }
     } finally {
         setLoading('refreshBtn', false);
@@ -594,11 +942,13 @@ function displayBuckets(buckets) {
                             <div><strong>Last Checked:</strong> ${formatDate(bucket.last_checked)}</div>
                             ${bucket.healed_at ? `<div><strong>Last Healed:</strong> ${formatDate(bucket.healed_at)}</div>` : ''}
                             ${bucket.heal_count ? `<div><strong>Heal Count:</strong> ${bucket.heal_count}</div>` : ''}
+                            ${bucket.status !== 'deleted' ? `
                             <div style="margin-top: 10px;">
                                 <button onclick="deleteBucket('${escapedProjectName}')" class="button-danger" style="float: right;">
                                     🗑️ Delete Bucket
                                 </button>
                             </div>
+                            ` : ''}
                         </div>
                     </div>
                 `;
@@ -633,7 +983,7 @@ async function deleteBucket(projectName) {
             } catch (e) {
                 errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             }
-            showStatus(`❌ ${errorMessage}`, 'error');
+            showStatus(`${errorMessage}`, 'error');
             return;
         }
 
@@ -650,15 +1000,15 @@ async function deleteBucket(projectName) {
             // Reload buckets list
             loadBuckets();
         } else {
-            showStatus('✅ Bucket deleted successfully', 'success');
+            showStatus('Bucket deleted successfully', 'success');
             loadBuckets();
         }
     } catch (error) {
         console.error('Delete bucket error:', error);
         if (error.message === 'Failed to fetch' || error.message.includes('NetworkError')) {
-            showStatus('❌ Network error: Cannot reach API', 'error');
+            showStatus('Network error: Cannot reach API', 'error');
         } else {
-            showStatus(`❌ Error: ${error.message}`, 'error');
+            showStatus(`Error: ${error.message}`, 'error');
         }
     }
 }
