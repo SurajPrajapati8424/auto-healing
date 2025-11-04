@@ -14,6 +14,50 @@ topic_arn = os.environ['SNS_TOPIC']
 environment = os.environ['ENVIRONMENT']
 region = os.environ.get('REGION', 'us-east-1')
 
+def _validate_custom_lifecycle_config(custom_config):
+    """
+    Validate custom lifecycle configuration before applying it.
+    Returns error message string if invalid, None if valid.
+    """
+    # Check if it's a dictionary
+    if not isinstance(custom_config, dict):
+        return "Custom lifecycle config must be a dictionary"
+    
+    # Check for Rules key
+    if 'Rules' not in custom_config:
+        return "Custom lifecycle config must contain a 'Rules' key"
+    
+    rules = custom_config.get('Rules', [])
+    
+    # Check if Rules is a list
+    if not isinstance(rules, list):
+        return "Rules must be a list"
+    
+    # Check if Rules is not empty
+    if len(rules) == 0:
+        return "Rules list cannot be empty"
+    
+    # Validate each rule
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return f"Rule at index {i} must be a dictionary"
+        
+        # Check for required fields
+        rule_id = rule.get('ID') or rule.get('Id')  # Accept both cases
+        if not rule_id:
+            return f"Rule at index {i} must have an 'ID' (or 'Id') field"
+        
+        # Check Status field
+        if 'Status' not in rule:
+            return f"Rule at index {i} must have a 'Status' field"
+        
+        status = rule.get('Status')
+        if status not in ['Enabled', 'Disabled']:
+            return f"Rule at index {i} has invalid Status '{status}'. Must be 'Enabled' or 'Disabled'"
+    
+    # All validations passed
+    return None
+
 def lambda_handler(event, context):
     try:
         # Extract user info from Cognito
@@ -63,16 +107,29 @@ def lambda_handler(event, context):
         if lifecycle_policy not in ['None', 'Auto-Archive', 'Auto-Delete', 'Custom']:
             lifecycle_policy = 'None'
         
-        # If Custom policy is selected, ensure custom config is provided
-        if lifecycle_policy == 'Custom' and not custom_lifecycle_config:
-            return {
-                'statusCode': 400,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({'error': 'Custom lifecycle policy requires custom_lifecycle_config field'})
-            }
+        # If Custom policy is selected, validate the custom config
+        if lifecycle_policy == 'Custom':
+            if not custom_lifecycle_config:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Custom lifecycle policy requires custom_lifecycle_config field'})
+                }
+            
+            # Validate custom lifecycle config structure
+            validation_error = _validate_custom_lifecycle_config(custom_lifecycle_config)
+            if validation_error:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': validation_error})
+                }
         
         project_name_raw = body['project_name'].strip()
         
@@ -204,10 +261,9 @@ def lambda_handler(event, context):
                 lifecycle_config = None
                 
                 if lifecycle_policy == 'Custom':
-                    # Use the provided custom configuration
-                    lifecycle_config = custom_lifecycle_config
-                    if not isinstance(lifecycle_config, dict) or 'Rules' not in lifecycle_config:
-                        raise ValueError("Custom lifecycle config must be a dict with 'Rules' key")
+                    # Use the provided custom configuration (already validated earlier)
+                    # Make a deep copy to avoid modifying the original
+                    lifecycle_config = json.loads(json.dumps(custom_lifecycle_config))
                     
                     # Normalize 'Id' to 'ID' in all rules (AWS requires uppercase)
                     if isinstance(lifecycle_config.get('Rules'), list):
