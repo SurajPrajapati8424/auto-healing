@@ -1,0 +1,1 @@
+aws cloudformation update-stack --stack-name <your-stack-name> --template-body file://infrastructure/cloudformation-template.yaml --parameters file://infrastructure/parameters.json

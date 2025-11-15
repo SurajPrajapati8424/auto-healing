@@ -1,0 +1,96 @@
+@startuml
+!theme aws-orange
+title Auto-Healing S3 Bucket Management System - High-Level Architecture
+
+skinparam backgroundColor #FFFFFF
+skinparam rectangleBorderColor #232F3E
+skinparam rectangleBackgroundColor #FFFFFF
+skinparam componentStyle rectangle
+skinparam linetype ortho
+
+package "Client Layer" {
+    component [Web Browser] as browser #LightBlue
+    component [HTML/CSS/JS\nFrontend] as frontend #LightBlue
+}
+
+package "Authentication Layer" {
+    component [AWS Cognito\nUser Pool &\nIdentity Pool] as cognito #Orange
+}
+
+package "API Layer" {
+    component [API Gateway\nREST API\nwith CORS] as apigw #Green
+}
+
+package "Business Logic Layer" {
+    component [Create Bucket\nLambda Function] as createLambda #Yellow
+    component [List Buckets\nLambda Function] as listLambda #Yellow
+    component [Monitor & Heal\nLambda Function] as monitorLambda #Yellow
+}
+
+package "Data Layer" {
+    component [Amazon S3\nManaged Storage] as s3 #Red
+    component [DynamoDB\nBucket Metadata] as dynamo #Purple
+}
+
+package "Notification Layer" {
+    component [Amazon SNS\nEmail Notifications] as sns #Pink
+}
+
+package "Automation Layer" {
+    component [EventBridge\n5-min Scheduler] as eventbridge #Cyan
+}
+
+' User Flow
+browser --> frontend : User Interaction
+frontend --> cognito : Authentication
+frontend --> apigw : API Calls\n(JWT Token)
+
+' API Gateway Flow
+apigw --> cognito : Validate Token
+apigw --> createLambda : POST /buckets
+apigw --> listLambda : GET /buckets
+
+' Create Bucket Flow
+createLambda --> s3 : Create & Configure\nBucket
+createLambda --> dynamo : Store Metadata
+createLambda --> sns : Send Notification
+
+' List Buckets Flow
+listLambda --> dynamo : Query User\nBuckets
+
+' Auto-Healing Flow
+eventbridge --> monitorLambda : Every 5 minutes
+monitorLambda --> dynamo : Get Active Buckets
+monitorLambda --> s3 : Check Bucket\nExistence
+monitorLambda --> s3 : Recreate if Missing
+monitorLambda --> sns : Healing Notification
+monitorLambda --> dynamo : Update Status
+
+' Styling for arrows
+skinparam arrow {
+    Color #232F3E
+    FontColor #232F3E
+}
+
+note top of browser
+    End User Access Point
+    - Registration/Login
+    - Bucket Management
+    - Real-time Status
+end note
+
+note bottom of s3
+    Secure Storage
+    - Encryption Enabled
+    - Public Access Blocked
+    - Versioning Configured
+end note
+
+note right of eventbridge
+    Automated Monitoring
+    - Runs every 5 minutes
+    - Detects missing buckets
+    - Triggers healing process
+end note
+
+@enduml
